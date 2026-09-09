@@ -18,6 +18,7 @@ Pause and the arm lifts, the platter coasts down, and the record slides home.
 - Hover the card for two corner buttons: one steps through fourteen pressings
   (right-click steps back), the other opens the full-screen view.
 - Follows whichever player is playing and hands off between players.
+- Lives on every workspace, or only the ones you choose, on the monitor you choose.
 - About 3% CPU while spinning, on a 144 Hz display.
 
 ## Pressings
@@ -76,7 +77,8 @@ omarchy plugin add https://github.com/Knowsys42/omarchy-vinyl.git --enable
 
 That puts a small record in the bar that turns while music plays. Left-click
 opens or closes the desktop widget, right-click opens the full-screen view,
-middle-click steps to the next pressing. The first click builds the widget
+middle-click steps to the next pressing. Shift+click brings the widget to the
+monitor and workspace you're on; Ctrl+click shows it everywhere again. The first click builds the widget
 from source, which takes about a minute and needs `rust`, `gtk4`, and
 `gtk4-layer-shell` (`omarchy pkg add rust gtk4 gtk4-layer-shell`). Once
 `vinyl` is on your `PATH` the plugin uses that instead.
@@ -98,10 +100,10 @@ cargo build --release
 install -Dm755 target/release/vinyl ~/.local/bin/vinyl
 ```
 
-To start it with your session, add to `~/.config/hypr/autostart.conf`:
+To start it with your session, add to `~/.config/hypr/autostart.lua`:
 
-```
-exec-once = vinyl --ignore brave
+```lua
+o.launch_on_start("vinyl --ignore brave")
 ```
 
 Optional, so Omarchy blurs the card like its own panels:
@@ -132,14 +134,48 @@ A second `vinyl` talks to the running one:
 vinyl --toggle              # start it, or quit it if it is running
 vinyl --fullscreen          # toggle the full-screen view
 vinyl --next-style          # step to the next pressing
+vinyl --monitor DP-2        # send it to another monitor (or `current`)
+vinyl --workspace 3         # show it only on workspace 3
+vinyl --workspace 1,3,music # ...or on several, by id or name
+vinyl --workspace current   # only where you are right now
+vinyl --workspace all       # back on every workspace
 vinyl --quit
 ```
+
+## Workspaces and monitors
+
+A layer-shell widget sits on one monitor and shows on all of that monitor's
+workspaces. `--monitor` picks the monitor (the connector name from
+`hyprctl monitors`, or `current`), and `--workspace` limits it to certain
+workspaces: the widget listens to Hyprland's event socket and hides itself
+whenever its monitor shows a workspace that isn't on the list. Both work on a
+running widget and are remembered in `~/.config/vinyl/`. The full-screen view
+always shows, wherever you are.
 
 By default the widget lives on the `bottom` layer: above the wallpaper, below
 every window, on every workspace. Show the desktop and it's there. Anything
 currently playing wins (ties broken by `--prefer`), otherwise the last active
 player stays, otherwise any paused player. Browsers publish MPRIS when a tab
 plays media, hence `--ignore brave`.
+
+## Uninstall
+
+```sh
+omarchy plugin remove io.github.knowsys42.vinyl   # the bar widget and its checkout
+rm -f ~/.local/bin/vinyl                          # if you installed the binary
+rm -rf ~/.config/vinyl                            # saved position, style, workspaces
+```
+
+Then drop the `launch_on_start` line from `~/.config/hypr/autostart.lua` if you
+added it. Nothing else on the system is touched: the widget writes only to
+`~/.config/vinyl/`, and the bar plugin builds inside its own plugin folder.
+
+## Dependencies
+
+Runtime: GTK 4, gtk4-layer-shell, and a Wayland compositor with
+wlr-layer-shell (Hyprland). Build: Rust (stable). All from the Arch repos:
+`omarchy pkg add rust gtk4 gtk4-layer-shell`. No network access at runtime
+except fetching album art from the URL the player reports.
 
 `tools/demo-player.py` is a fake MPRIS player for trying the widget without a
 music app: `tools/demo-player.py --art cover.png`.
@@ -161,6 +197,8 @@ music app: `tools/demo-player.py --art cover.png`.
   out the card.
 - `src/arm.rs`: tone arm geometry (law of cosines from pivot to groove radius)
   and Cairo drawing, with a shadow that grows when the arm is lifted.
+- `src/hypr.rs`: `hyprctl -j` queries and the Hyprland event socket, for the
+  workspace filter and monitor moves.
 - `src/theme.rs`: reads the palette Omarchy links at
   `~/.local/state/omarchy/current/theme/colors.toml` and watches it for
   theme switches.

@@ -7,7 +7,9 @@ import qs.Ui
 
 // A little record in the bar. It turns while any MPRIS player is playing.
 // Left click opens or closes the desktop widget, right click opens the
-// full-screen view, middle click steps to the next pressing.
+// full-screen view, middle click steps to the next pressing. Shift+click
+// brings the widget to this monitor and workspace; Ctrl+click shows it on
+// every workspace again.
 BarWidget {
   id: root
   moduleName: "io.github.knowsys42.vinyl"
@@ -27,6 +29,14 @@ BarWidget {
   }
   readonly property bool isPlaying: playing !== null
   readonly property string title: playing ? (playing.trackTitle || "") : ""
+
+  // Panel-lifecycle contract the shell may call on bar widgets. This widget
+  // has no popout, so open/close/toggle drive the desktop widget instead.
+  readonly property bool opened: false
+  function open() { root.run("toggle") }
+  function close() { }
+  function toggle() { root.run("toggle") }
+  function closeForPopoutSwitch() { }
 
   function run(action) {
     Quickshell.execDetached({
@@ -109,7 +119,9 @@ BarWidget {
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
     onClicked: function (event) {
-      if (event.button === Qt.LeftButton) root.run("toggle")
+      if (event.modifiers & Qt.ShiftModifier) root.run("here")
+      else if (event.modifiers & Qt.ControlModifier) root.run("everywhere")
+      else if (event.button === Qt.LeftButton) root.run("toggle")
       else if (event.button === Qt.RightButton) root.run("fullscreen")
       else root.run("style")
     }

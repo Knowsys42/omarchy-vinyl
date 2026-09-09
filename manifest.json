@@ -4,8 +4,11 @@
   "name": "Vinyl",
   "version": "0.2.0",
   "author": "Derek Choate",
+  "license": "MIT",
   "description": "A spinning-record now-playing widget for any MPRIS player, with a bar button that shows when music is on.",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },

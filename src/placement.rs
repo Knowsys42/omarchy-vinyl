@@ -22,9 +22,29 @@ pub enum Anchor {
     Center,
 }
 
+impl Anchor {
+    const KEYS: [(Anchor, &'static str); 9] = [
+        (Anchor::TopLeft, "top-left"),
+        (Anchor::TopRight, "top-right"),
+        (Anchor::BottomLeft, "bottom-left"),
+        (Anchor::BottomRight, "bottom-right"),
+        (Anchor::Top, "top"),
+        (Anchor::Bottom, "bottom"),
+        (Anchor::Left, "left"),
+        (Anchor::Right, "right"),
+        (Anchor::Center, "center"),
+    ];
+    fn key(self) -> &'static str {
+        Self::KEYS.iter().find(|(a, _)| *a == self).map(|(_, k)| *k).unwrap()
+    }
+    fn from_key(s: &str) -> Option<Self> {
+        Self::KEYS.iter().find(|(_, k)| *k == s).map(|(a, _)| *a)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Placement {
-    Anchored { anchor: Anchor, margin: i32 },
+    Anchored { anchor: Anchor, margin: i32, monitor: Option<String> },
     /// Top-left corner offset within a monitor, in logical pixels.
     At { x: i32, y: i32, monitor: Option<String> },
 }
@@ -60,31 +80,45 @@ pub fn load_config(name: &str) -> Option<String> {
 }
 
 impl Placement {
+    /// `at X Y [MONITOR]`, `anchored ANCHOR MARGIN [MONITOR]`, or the older
+    /// bare `X Y [MONITOR]`.
     pub fn load_saved() -> Option<Self> {
         let text = std::fs::read_to_string(state_file()).ok()?;
-        let mut parts = text.split_whitespace();
-        let x = parts.next()?.parse().ok()?;
-        let y = parts.next()?.parse().ok()?;
-        let monitor = parts.next().map(str::to_string);
-        Some(Self::At { x, y, monitor })
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        let monitor = |i: usize| parts.get(i).map(|s| s.to_string());
+        match parts.first().copied() {
+            Some("at") => Some(Self::At { x: parts.get(1)?.parse().ok()?, y: parts.get(2)?.parse().ok()?, monitor: monitor(3) }),
+            Some("anchored") => Some(Self::Anchored {
+                anchor: Anchor::from_key(parts.get(1)?)?,
+                margin: parts.get(2)?.parse().ok()?,
+                monitor: monitor(3),
+            }),
+            Some(_) => Some(Self::At { x: parts.first()?.parse().ok()?, y: parts.get(1)?.parse().ok()?, monitor: monitor(2) }),
+            None => None,
+        }
+    }
+
+    pub fn monitor(&self) -> Option<&str> {
+        match self {
+            Self::At { monitor, .. } | Self::Anchored { monitor, .. } => monitor.as_deref(),
+        }
+    }
+
+    pub fn with_monitor(mut self, name: Option<String>) -> Self {
+        match &mut self {
+            Self::At { monitor, .. } | Self::Anchored { monitor, .. } => *monitor = name,
+        }
+        self
     }
 
     fn save(&self) {
-        let path = state_file();
-        match self {
-            Self::At { x, y, monitor } => {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let line = format!("{x} {y} {}\n", monitor.as_deref().unwrap_or(""));
-                if let Err(e) = std::fs::write(&path, line) {
-                    eprintln!("vinyl: cannot save position: {e}");
-                }
+        let line = match self {
+            Self::At { x, y, monitor } => format!("at {x} {y} {}", monitor.as_deref().unwrap_or("")),
+            Self::Anchored { anchor, margin, monitor } => {
+                format!("anchored {} {margin} {}", anchor.key(), monitor.as_deref().unwrap_or(""))
             }
-            Self::Anchored { .. } => {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+        };
+        save_config("position", line.trim_end());
     }
 }
 
@@ -104,10 +138,8 @@ impl Placer {
             window.set_layer(l);
             window.set_keyboard_mode(KeyboardMode::None);
             window.set_exclusive_zone(0);
-            if let Placement::At { monitor: Some(name), .. } = &placement {
-                if let Some(m) = find_monitor(name) {
-                    window.set_monitor(Some(&m));
-                }
+            if let Some(m) = placement.monitor().and_then(find_monitor) {
+                window.set_monitor(Some(&m));
             }
         }
         let p = Self {
@@ -131,7 +163,7 @@ impl Placer {
         }
         let w = &self.window;
         let (top, bottom, left, right, mt, mb, ml, mr) = match &*self.current.borrow() {
-            Placement::Anchored { anchor, margin } => {
+            Placement::Anchored { anchor, margin, .. } => {
                 let m = *margin;
                 let (t, b, l, r) = match anchor {
                     Anchor::TopLeft => (true, false, true, false),
@@ -188,7 +220,7 @@ impl Placer {
         let current = self.current.borrow().clone();
         let (x, y) = match current {
             Placement::At { x, y, .. } => (x, y),
-            Placement::Anchored { anchor, margin } => {
+            Placement::Anchored { anchor, margin, .. } => {
                 let (l, r, t, b) = match anchor {
                     Anchor::TopLeft => (true, false, true, false),
                     Anchor::TopRight => (false, true, true, false),
@@ -234,6 +266,59 @@ impl Placer {
         if self.dragging.replace(false) {
             self.current.borrow().save();
         }
+    }
+
+    /// The monitor this widget lives on: what the placement says, or where
+    /// the surface currently is.
+    pub fn monitor_name(&self) -> Option<String> {
+        self.current
+            .borrow()
+            .monitor()
+            .map(str::to_string)
+            .or_else(|| self.frame().and_then(|(_, _, _, name)| name))
+    }
+
+    /// Record the monitor the surface is on (call once mapped), so the widget
+    /// can find its way back after being hidden.
+    pub fn remember_monitor(&self) {
+        if self.current.borrow().monitor().is_some() {
+            return;
+        }
+        if let Some((_, _, _, Some(name))) = self.frame() {
+            let cur = self.current.borrow().clone();
+            *self.current.borrow_mut() = cur.with_monitor(Some(name));
+        }
+    }
+
+    /// Move to another monitor, keeping the anchor or position. Layer-shell only.
+    pub fn set_monitor(&self, name: &str) -> bool {
+        let Some(monitor) = find_monitor(name) else {
+            eprintln!("vinyl: no monitor named {name}");
+            return false;
+        };
+        if self.layer.is_none() {
+            return false;
+        }
+        let cur = self.current.borrow().clone();
+        let cur = match cur {
+            // A dragged position is relative to the old monitor; re-anchor.
+            Placement::At { .. } => Placement::Anchored { anchor: Anchor::BottomRight, margin: 32, monitor: Some(name.to_string()) },
+            other => other.with_monitor(Some(name.to_string())),
+        };
+        *self.current.borrow_mut() = cur;
+        // gtk4-layer-shell applies the monitor on map, so remap.
+        let was_visible = self.window.is_visible();
+        if std::env::var_os("VINYL_DEBUG").is_some() {
+            eprintln!("vinyl: set_monitor {name}: connector {:?}, visible {was_visible}", monitor.connector());
+        }
+        self.window.set_visible(false);
+        self.window.set_monitor(Some(&monitor));
+        self.apply();
+        if was_visible {
+            self.window.set_visible(true);
+        }
+        self.current.borrow().save();
+        true
     }
 
     pub fn set_fullscreen(&self, on: bool) {

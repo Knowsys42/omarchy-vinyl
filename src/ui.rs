@@ -5,6 +5,7 @@
 use crate::arm::{self, ArmGeometry};
 use crate::art;
 use crate::backdrop::Backdrop;
+use crate::hypr;
 use crate::mpris::{Command, PlayerState, Status};
 use crate::placement::Placer;
 use crate::record::{presets, RecordPaintable, Rgb, VinylStyle};
@@ -102,6 +103,8 @@ pub struct UiConfig {
     pub show_arm: bool,
     pub start_fullscreen: bool,
     pub opaque: bool,
+    /// Initial `--workspace` spec, if any; otherwise the saved one.
+    pub workspaces: Option<String>,
 }
 
 /// Animation state, scale-independent.
@@ -279,6 +282,9 @@ pub struct Ui {
     theme_colors: RefCell<Vec<Rgb>>,
     theme_monitor: RefCell<Option<gio::FileMonitor>>,
     flash_gen: Cell<u64>,
+    /// Workspace ids or names to show on; empty means everywhere.
+    workspaces: RefCell<Vec<String>>,
+    workspace_gen: Cell<u64>,
     state: RefCell<Option<PlayerState>>,
     art_url: RefCell<Option<String>>,
     art_tex: RefCell<Option<gdk::Texture>>,
@@ -445,6 +451,8 @@ impl Ui {
             theme_colors: RefCell::new(theme_colors),
             theme_monitor: RefCell::new(None),
             flash_gen: Cell::new(0),
+            workspaces: RefCell::new(Vec::new()),
+            workspace_gen: Cell::new(0),
             cfg,
             state: RefCell::new(None),
             art_url: RefCell::new(None),
@@ -457,6 +465,7 @@ impl Ui {
         ui.wire_events();
         ui.show_idle();
         ui.watch_theme();
+        ui.init_workspaces();
 
         let this = ui.clone();
         glib::timeout_add_local(Duration::from_millis(250), move || {
@@ -566,6 +575,9 @@ impl Ui {
             return;
         }
         self.placer.set_fullscreen(on);
+        if on && !self.window.is_visible() {
+            self.window.set_visible(true);
+        }
         let k = if on {
             let (mw, mh) = self.placer.monitor_size().unwrap_or((1920, 1080));
             ((mh as f64 * 0.62 / B_STAGE_H).min(mw as f64 * 0.42 / B_STAGE_W)).clamp(1.5, 8.0)
@@ -584,6 +596,9 @@ impl Ui {
             l.set_width_chars(if on { 28 } else { 24 });
         }
         self.rebuild_stage(k);
+        if !on {
+            self.refresh_workspace_visibility();
+        }
     }
 
     fn rebuild_stage(self: &Rc<Self>, k: f64) {
@@ -603,6 +618,112 @@ impl Ui {
             stage.apply(&self.anim.borrow());
         }
         self.wire_stage_click();
+    }
+
+    // --- workspaces and monitors --------------------------------------------
+
+    fn init_workspaces(self: &Rc<Self>) {
+        let spec = self
+            .cfg
+            .workspaces
+            .clone()
+            .or_else(|| crate::placement::load_config("workspaces"));
+        let this = self.clone();
+        self.window.connect_map(move |_| {
+            this.placer.remember_monitor();
+            this.refresh_workspace_visibility();
+        });
+        if hypr::available() {
+            let this = self.clone();
+            hypr::watch(move || this.refresh_workspace_visibility());
+        }
+        if let Some(spec) = spec {
+            self.set_workspaces(spec);
+        }
+    }
+
+    /// `all`, `current`, or a comma list of workspace ids/names.
+    pub fn set_workspaces(self: &Rc<Self>, spec: String) {
+        let spec = spec.trim().to_string();
+        if spec == "current" {
+            let this = self.clone();
+            glib::spawn_future_local(async move {
+                if let Some(m) = hypr::focused().await {
+                    this.apply_workspaces(vec![m.workspace_id.to_string()]);
+                }
+            });
+            return;
+        }
+        let list: Vec<String> = if spec.is_empty() || spec == "all" {
+            Vec::new()
+        } else {
+            spec.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        };
+        self.apply_workspaces(list);
+    }
+
+    fn apply_workspaces(self: &Rc<Self>, list: Vec<String>) {
+        let text = if list.is_empty() { "all".to_string() } else { list.join(",") };
+        *self.workspaces.borrow_mut() = list;
+        crate::placement::save_config("workspaces", &text);
+        self.flash(&format!("workspace {text}"));
+        self.refresh_workspace_visibility();
+    }
+
+    /// Show only when this widget's monitor has one of the chosen workspaces
+    /// active. Full screen always shows.
+    fn refresh_workspace_visibility(self: &Rc<Self>) {
+        let list = self.workspaces.borrow().clone();
+        if list.is_empty() || self.placer.is_fullscreen() {
+            self.window.set_visible(true);
+            return;
+        }
+        let gen = self.workspace_gen.get() + 1;
+        self.workspace_gen.set(gen);
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let monitors = hypr::monitors().await;
+            if this.workspace_gen.get() != gen {
+                return;
+            }
+            let mine = this.placer.monitor_name();
+            let target = monitors
+                .iter()
+                .find(|m| Some(&m.name) == mine.as_ref())
+                .or_else(|| monitors.iter().find(|m| m.focused));
+            let visible = match target {
+                Some(m) => list.iter().any(|w| *w == m.workspace_id.to_string() || *w == m.workspace_name),
+                None => true,
+            };
+            if std::env::var_os("VINYL_DEBUG").is_some() {
+                eprintln!("vinyl: workspaces {list:?} monitor {mine:?} target {target:?} -> visible {visible}");
+            }
+            if this.placer.is_fullscreen() {
+                return;
+            }
+            if this.window.is_visible() != visible {
+                this.window.set_visible(visible);
+            }
+        });
+    }
+
+    /// `current` or a connector name.
+    pub fn send_to_monitor(self: &Rc<Self>, name: String) {
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let name = if name == "current" {
+                match hypr::focused().await {
+                    Some(m) => m.name,
+                    None => return,
+                }
+            } else {
+                name
+            };
+            if this.placer.set_monitor(&name) {
+                this.flash(&name);
+                this.refresh_workspace_visibility();
+            }
+        });
     }
 
     // --- vinyl style --------------------------------------------------------

@@ -4,6 +4,8 @@
 #   vinyl-ctl toggle       start the desktop widget, or quit it if running
 #   vinyl-ctl fullscreen   open/close the full-screen view (starts it if needed)
 #   vinyl-ctl style        step to the next pressing
+#   vinyl-ctl here         bring the widget to this monitor and workspace
+#   vinyl-ctl everywhere   show it on every workspace again
 #   vinyl-ctl build        build the binary from this checkout
 #   vinyl-ctl status       print "ready", "missing", or "building"
 
@@ -73,5 +75,7 @@ case "$cmd" in
   toggle)     exec "$bin" --toggle "${extra[@]}" ;;
   fullscreen) exec "$bin" --fullscreen "${extra[@]}" ;;
   style)      exec "$bin" --next-style ;;
-  *) echo "usage: vinyl-ctl [toggle|fullscreen|style|build|status]" >&2; exit 2 ;;
+  here)       exec "$bin" --monitor current --workspace current "${extra[@]}" ;;
+  everywhere) exec "$bin" --workspace all "${extra[@]}" ;;
+  *) echo "usage: vinyl-ctl [toggle|fullscreen|style|here|everywhere|build|status]" >&2; exit 2 ;;
 esac
