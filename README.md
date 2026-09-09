@@ -76,6 +76,11 @@ layerrule = ignorezero, vinyl
   `Seeked` per player, polls `Position` while playing, interpolates in between.
 - `src/art.rs`: loads `file://`, `http(s)://`, or `data:` art off the main
   thread and decodes it to a `gdk::Texture`.
-- `src/ui.rs`: GTK 4 widgets, a `gtk::Fixed` with a GSK rotation transform for
-  the record, Cairo for the grooves and a static light reflection, and a
-  frame-clock tick callback with velocity easing for spin-up and coast-down.
+- `src/record.rs`: a custom `gdk::Paintable` for the record. The grooves are
+  drawn once with Cairo and uploaded as a texture; each frame only rotates that
+  texture plus the art label inside the paintable's own snapshot, so a new angle
+  invalidates one picture rather than relaying out the card. About 3% CPU while
+  spinning at 60 fps.
+- `src/ui.rs`: GTK 4 widgets, the sleeve, text, progress and controls, a Cairo
+  overlay for the static light reflection, and a frame-clock tick callback with
+  velocity easing for spin-up, coast-down and the sleeve slide.

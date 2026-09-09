@@ -1,5 +1,6 @@
 mod art;
 mod mpris;
+mod record;
 mod ui;
 
 use clap::{Parser, ValueEnum};
