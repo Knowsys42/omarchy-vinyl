@@ -8,6 +8,7 @@ mod theme;
 mod ui;
 
 use clap::{Parser, ValueEnum};
+use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4_layer_shell::Layer;
@@ -50,11 +51,20 @@ struct Args {
     /// Hide the tone arm.
     #[arg(long)]
     no_arm: bool,
-    /// Start in full-screen mode.
+    /// Start in full-screen mode; if the widget is already running, toggle it.
     #[arg(long)]
     fullscreen: bool,
+    /// Start the widget, or quit it if it is already running.
+    #[arg(long)]
+    toggle: bool,
+    /// Quit a running widget.
+    #[arg(long)]
+    quit: bool,
+    /// Step a running widget to the next pressing.
+    #[arg(long)]
+    next_style: bool,
     /// Players to prefer when several are playing (identity or bus-name substring).
-    #[arg(long, default_values_t = vec!["spotify".to_string(), "cider".to_string()])]
+    #[arg(long)]
     prefer: Vec<String>,
     /// Players to never show, e.g. --ignore brave --ignore firefox.
     #[arg(long)]
@@ -64,14 +74,48 @@ struct Args {
     rpm: f64,
 }
 
+const APP_ID: &str = "io.github.knowsys42.vinyl";
+
 fn main() -> glib::ExitCode {
     let args = Args::parse();
-    let app = gtk::Application::new(Some("dev.derek.vinyl"), Default::default());
+    let app = gtk::Application::new(Some(APP_ID), Default::default());
+
+    // A second launch reaches the running instance over D-Bus. Remote flags
+    // become action activations; otherwise the running instance is raised.
+    if let Err(e) = app.register(gio::Cancellable::NONE) {
+        eprintln!("vinyl: cannot register application: {e}");
+    }
+    if app.is_remote() {
+        let mut acted = false;
+        for (flag, action) in [
+            (args.quit || args.toggle, "quit"),
+            (args.fullscreen, "fullscreen"),
+            (args.next_style, "next-style"),
+        ] {
+            if flag {
+                app.activate_action(action, None);
+                acted = true;
+            }
+        }
+        if acted {
+            // Exit without tearing the GApplication down: it was never run,
+            // and its destructor would only complain about that.
+            std::process::exit(0);
+        }
+    } else if args.quit {
+        return glib::ExitCode::SUCCESS;
+    }
+
     app.connect_activate(move |app| activate(app, &args));
     app.run_with_args::<&str>(&[])
 }
 
 fn activate(app: &gtk::Application, args: &Args) {
+    // A plain second launch lands here in the running instance; one window is enough.
+    if let Some(w) = app.active_window() {
+        w.present();
+        return;
+    }
     let layer = match args.layer {
         LayerArg::Bottom => Some(Layer::Bottom),
         LayerArg::Top => Some(Layer::Top),
@@ -103,6 +147,19 @@ fn activate(app: &gtk::Application, args: &Args) {
     };
     let ui = ui::Ui::build(app, cfg, move |window| Placer::new(window, layer, placement));
     ui.window.present();
+
+    let quit = gio::SimpleAction::new("quit", None);
+    let a = app.clone();
+    quit.connect_activate(move |_, _| a.quit());
+    app.add_action(&quit);
+    let fullscreen = gio::SimpleAction::new("fullscreen", None);
+    let u = ui.clone();
+    fullscreen.connect_activate(move |_, _| u.toggle_fullscreen());
+    app.add_action(&fullscreen);
+    let next_style = gio::SimpleAction::new("next-style", None);
+    let u = ui.clone();
+    next_style.connect_activate(move |_, _| u.cycle_style(1));
+    app.add_action(&next_style);
 
     let prefs = Preferences {
         prefer: args.prefer.clone(),

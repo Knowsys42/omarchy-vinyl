@@ -552,6 +552,10 @@ impl Ui {
 
     // --- full screen --------------------------------------------------------
 
+    pub fn toggle_fullscreen(self: &Rc<Self>) {
+        self.set_fullscreen(!self.placer.is_fullscreen());
+    }
+
     pub fn set_fullscreen(self: &Rc<Self>, on: bool) {
         if self.placer.is_fullscreen() == on {
             return;
@@ -599,7 +603,7 @@ impl Ui {
     // --- vinyl style --------------------------------------------------------
 
     /// Step through the presets. A custom style (from `--vinyl`) starts at the first preset.
-    fn cycle_style(self: &Rc<Self>, delta: i32) {
+    pub fn cycle_style(self: &Rc<Self>, delta: i32) {
         let list = presets();
         let current = self.style.borrow().clone();
         let idx = list.iter().position(|p| p.style == current);
@@ -669,7 +673,7 @@ impl Ui {
             self.player_label.set_text("NOTHING PLAYING");
         }
         self.title.set_text("Drop the needle");
-        self.artist.set_text("Start Spotify or Cider");
+        self.artist.set_text("Play something");
         self.album.set_text("");
         self.progress.set_fraction(0.0);
         self.elapsed.set_text("0:00");

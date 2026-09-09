@@ -1,0 +1,77 @@
+#!/bin/bash
+# Bar-widget helper: find (or build) the vinyl binary and drive it.
+#
+#   vinyl-ctl toggle       start the desktop widget, or quit it if running
+#   vinyl-ctl fullscreen   open/close the full-screen view (starts it if needed)
+#   vinyl-ctl style        step to the next pressing
+#   vinyl-ctl build        build the binary from this checkout
+#   vinyl-ctl status       print "ready", "missing", or "building"
+
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lock="${XDG_RUNTIME_DIR:-/tmp}/vinyl-build.lock"
+
+find_bin() {
+  if command -v vinyl >/dev/null 2>&1; then
+    command -v vinyl
+  elif [[ -x "$here/target/release/vinyl" ]]; then
+    echo "$here/target/release/vinyl"
+  else
+    return 1
+  fi
+}
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 && notify-send -a Vinyl "$@" || true
+}
+
+build() {
+  if [[ -e $lock ]]; then
+    echo "building" >&2
+    exit 0
+  fi
+  local missing=()
+  for pkg in rust gtk4 gtk4-layer-shell; do
+    pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+  done
+  if (( ${#missing[@]} )); then
+    notify "Vinyl needs packages" "Run: omarchy pkg add ${missing[*]}"
+    echo "missing packages: ${missing[*]}" >&2
+    exit 1
+  fi
+  touch "$lock"
+  trap 'rm -f "$lock"' EXIT
+  notify "Vinyl" "Building the widget, this takes a minute…"
+  if (cd "$here" && cargo build --release >/tmp/vinyl-build.log 2>&1); then
+    notify "Vinyl" "Ready. Click the bar record to open it."
+  else
+    notify "Vinyl build failed" "See /tmp/vinyl-build.log"
+    exit 1
+  fi
+}
+
+cmd="${1:-toggle}"
+case "$cmd" in
+  status)
+    if [[ -e $lock ]]; then echo building; elif find_bin >/dev/null; then echo ready; else echo missing; fi
+    exit 0
+    ;;
+  build)
+    build
+    exit 0
+    ;;
+esac
+
+bin=$(find_bin) || { build; bin=$(find_bin); }
+
+# Extra arguments for a fresh start come from the plugin's shell.json entry
+# via VINYL_ARGS, e.g. "--vinyl marble --ignore brave".
+read -r -a extra <<<"${VINYL_ARGS:-}"
+
+case "$cmd" in
+  toggle)     exec "$bin" --toggle "${extra[@]}" ;;
+  fullscreen) exec "$bin" --fullscreen "${extra[@]}" ;;
+  style)      exec "$bin" --next-style ;;
+  *) echo "usage: vinyl-ctl [toggle|fullscreen|style|build|status]" >&2; exit 2 ;;
+esac
