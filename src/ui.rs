@@ -79,6 +79,7 @@ button.fs { padding: 2px; color: rgba(255,255,255,0.35); opacity: 0; }
 button.fs:hover { color: rgba(255,255,255,0.9); }
 .flash { color: rgba(255,255,255,0.85); }
 
+window.opaque .card { background: #121216; }
 window.takeover .card { background: transparent; border: none; box-shadow: none; padding: 0; }
 window.takeover .column { margin-left: 48px; }
 window.takeover .player { font-size: 15px; letter-spacing: 4px; }
@@ -100,6 +101,7 @@ pub struct UiConfig {
     pub style: VinylStyle,
     pub show_arm: bool,
     pub start_fullscreen: bool,
+    pub opaque: bool,
 }
 
 /// Animation state, scale-independent.
@@ -410,6 +412,9 @@ impl Ui {
 
         let window = gtk::ApplicationWindow::new(app);
         window.set_title(Some("Vinyl"));
+        if cfg.opaque {
+            window.add_css_class("opaque");
+        }
         window.set_decorated(false);
         window.set_resizable(true);
         window.set_child(Some(&root));

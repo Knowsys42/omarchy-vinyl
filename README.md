@@ -1,51 +1,28 @@
-# vinyl
+# Vinyl
 
-A spinning-record "now playing" widget for [Omarchy](https://omarchy.org) (Hyprland),
-in the spirit of MD Vinyl on macOS. It reads whatever is playing over
-[MPRIS](https://specifications.freedesktop.org/mpris-spec/latest/), so it works
-with Spotify, Cider, and any other player that speaks it. No accounts, no API keys.
+A spinning-record "now playing" widget for [Omarchy](https://omarchy.org) and
+other Hyprland desktops. It reads whatever is playing over
+[MPRIS](https://specifications.freedesktop.org/mpris-spec/latest/), so any
+music player that speaks it works, with no accounts and no API keys.
+
+![The widget on the desktop](docs/widget.png)
 
 Press play and the record slides out of its sleeve, spins up to 33⅓, and the
-tone arm drops onto the groove; the stylus tracks inward as the song plays.
+tone arm drops onto the groove. The stylus tracks inward as the song plays.
 Pause and the arm lifts, the platter coasts down, and the record slides home.
-Click the record or the arm to play/pause, click the sleeve to raise the
-player window, and drag anywhere on the card to move the widget. The corner
-button (or `--fullscreen`) opens a full-screen view with a large record over
-the blurred album art; Escape or a click on the background brings it back.
 
-## Build
+![Play, slide, drop the needle](docs/spin.gif)
 
-Needs GTK 4, gtk4-layer-shell, and a Rust toolchain (all in the Arch repos):
-
-```sh
-sudo pacman -S --needed gtk4 gtk4-layer-shell rust
-cargo build --release
-install -Dm755 target/release/vinyl ~/.local/bin/vinyl
-```
-
-## Run
-
-```sh
-vinyl                       # bottom-right corner, on the desktop layer
-vinyl --anchor top-left     # other corners/edges: top-right, bottom-left, top, bottom, left, right, center
-vinyl --layer top           # sit above windows instead of under them
-vinyl --layer window        # plain floating window (for testing)
-vinyl --ignore brave        # never show browser tabs; repeatable
-vinyl --prefer cider        # who wins when several players are playing
-vinyl --rpm 45
-vinyl --vinyl marble        # a preset (see below)
-vinyl --vinyl crimson       # any CSS colour: "#1e90ff", teal, ...
-vinyl --vinyl splatter:theme        # pattern:palette combos
-vinyl --vinyl split:#1e90ff,white
-vinyl --no-arm              # hide the tone arm
-vinyl --fullscreen          # start in the full-screen view
-```
+- Click the record or the arm to play/pause, the sleeve to raise the player.
+- Drag the card anywhere to move it. The position is remembered.
+- Hover the card for two corner buttons: one steps through fourteen pressings
+  (right-click steps back), the other opens the full-screen view.
+- Follows whichever player is playing and hands off between players.
+- About 3% CPU while spinning, on a 144 Hz display.
 
 ## Pressings
 
-The palette button in the card's corner (visible on hover) steps through the
-presets; right-click steps back. The choice is remembered in
-`~/.config/vinyl/style` and used on the next start unless `--vinyl` is given.
+![All fourteen pressings](docs/pressings.png)
 
 | Preset | Look |
 | --- | --- |
@@ -64,75 +41,138 @@ presets; right-click steps back. The choice is remembered in
 | `glow` | Glow-in-the-dark green. |
 | `omarchy` | Marbled from the current Omarchy theme: accent, the most saturated theme colours, foreground. Re-presses live when you switch themes. |
 
-Any pattern (`solid`, `marble`, `splatter`, `split`, `tri`, `starburst`,
-`galaxy`, `smoke`, `picture`, `rainbow`, `gold`, `clear`) can be combined with
-any palette (`art`, `theme`, `black`, or a comma-separated list of CSS colours)
-as `pattern:palette`, so `starburst:theme` or `tri:crimson,gold,black` work.
+The art-based pressings pick the album's dominant colour first, then the
+colours most distinct from it, so two-tone patterns keep their contrast. Any
+pattern (`solid`, `marble`, `splatter`, `split`, `tri`, `starburst`, `galaxy`,
+`smoke`, `picture`, `rainbow`, `gold`, `clear`) combines with any palette
+(`art`, `theme`, `black`, or a comma-separated list of CSS colours) as
+`pattern:palette`:
 
-Drag the card and the new position is remembered in
-`~/.config/vinyl/position` (with the monitor it was on). Passing `--anchor`
-again forgets it.
+```sh
+vinyl --vinyl starburst:theme
+vinyl --vinyl tri:crimson,gold,black
+vinyl --vinyl splatter:#1e90ff,white
+vinyl --vinyl teal                  # a plain CSS colour is a solid pressing
+```
 
-By default the widget lives on the `bottom` layer: above the wallpaper, below
-every window, on every workspace. Show the desktop and it's there.
+The pressing picked with the button is saved to `~/.config/vinyl/style` and
+used on the next start unless `--vinyl` is given.
 
-Player choice: anything currently *playing* wins (ties broken by `--prefer`,
-default `spotify` then `cider`), otherwise the last active player stays, otherwise
-any paused player. Browsers show up too, because they publish MPRIS when a tab
-plays media, hence `--ignore brave`.
+## Full screen
 
-## Autostart on Omarchy
+![Full-screen view](docs/fullscreen.png)
 
-Add to `~/.config/hypr/autostart.conf`:
+The corner button, `--fullscreen`, or a right-click on the bar widget fills the
+monitor with a large record over a blurred, darkened version of the album art.
+Escape or a click on the background brings the widget back.
+
+## Install
+
+### As an Omarchy plugin
+
+```sh
+omarchy plugin add https://github.com/Knowsys42/omarchy-vinyl.git --enable
+```
+
+That puts a small record in the bar that turns while music plays. Left-click
+opens or closes the desktop widget, right-click opens the full-screen view,
+middle-click steps to the next pressing. The first click builds the widget
+from source, which takes about a minute and needs `rust`, `gtk4`, and
+`gtk4-layer-shell` (`omarchy pkg add rust gtk4 gtk4-layer-shell`). Once
+`vinyl` is on your `PATH` the plugin uses that instead.
+
+Bar-widget settings, in the plugin's entry in `~/.config/omarchy/shell.json`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `args` | `""` | Extra flags for a fresh start, e.g. `"--vinyl marble --ignore brave"`. |
+| `showTitle` | `false` | Show the playing track's title next to the record. |
+
+### From source
+
+```sh
+sudo pacman -S --needed gtk4 gtk4-layer-shell rust
+git clone https://github.com/Knowsys42/omarchy-vinyl.git
+cd omarchy-vinyl
+cargo build --release
+install -Dm755 target/release/vinyl ~/.local/bin/vinyl
+```
+
+To start it with your session, add to `~/.config/hypr/autostart.conf`:
 
 ```
 exec-once = vinyl --ignore brave
 ```
 
-Optional, to let Omarchy blur the card like its own panels, add to
-`~/.config/hypr/looknfeel.conf` (or wherever your layer rules live):
+Optional, so Omarchy blurs the card like its own panels:
 
 ```
 layerrule = blur, vinyl
 layerrule = ignorezero, vinyl
 ```
 
-## Player notes
+## Run
 
-- **Spotify** publishes clean MPRIS with CDN album art. Everything works.
-- **Cider** publishes MPRIS through Electron's Chromium media-session bridge
-  (`org.mpris.MediaPlayer2.chromium.instanceNNN`, identity `Cider`). The name
-  only appears once playback has started. Around track skips it sends a burst of
-  partial updates, some with a blank title, so the widget keeps the last good
-  text and re-reads the metadata a second later. Cider also has a hidden,
-  deprecated native MPRIS module (`linux.useMpris: true` in
-  `~/.config/sh.cider.genten/client-options.yml`); enabling it turns the
-  Chromium bridge off and, in testing, registered nothing, so leave it alone.
-- **Browsers** (Brave, Firefox, Chromium) publish MPRIS per tab. They're not
-  ignored by default; pass `--ignore`.
+```sh
+vinyl                       # bottom-right corner, on the desktop layer
+vinyl --anchor top-left     # top-right, bottom-left, top, bottom, left, right, center
+vinyl --layer top           # sit above windows instead of under them
+vinyl --layer window        # plain floating window
+vinyl --ignore brave        # never show browser tabs; repeatable
+vinyl --prefer mpv          # who wins when several players are playing
+vinyl --vinyl marble        # a preset, a CSS colour, or pattern:palette
+vinyl --no-arm              # hide the tone arm
+vinyl --opaque              # solid card instead of translucent
+vinyl --rpm 45
+```
+
+A second `vinyl` talks to the running one:
+
+```sh
+vinyl --toggle              # start it, or quit it if it is running
+vinyl --fullscreen          # toggle the full-screen view
+vinyl --next-style          # step to the next pressing
+vinyl --quit
+```
+
+By default the widget lives on the `bottom` layer: above the wallpaper, below
+every window, on every workspace. Show the desktop and it's there. Anything
+currently playing wins (ties broken by `--prefer`), otherwise the last active
+player stays, otherwise any paused player. Browsers publish MPRIS when a tab
+plays media, hence `--ignore brave`.
+
+`tools/demo-player.py` is a fake MPRIS player for trying the widget without a
+music app: `tools/demo-player.py --art cover.png`.
 
 ## How it works
 
 - `src/mpris.rs`: GDBus on the GLib main loop. Watches `NameOwnerChanged` for
   players appearing and vanishing, subscribes to `PropertiesChanged` and
   `Seeked` per player, polls `Position` while playing, interpolates in between.
+  Chromium-based players send partial metadata around track changes, so blank
+  updates keep the previous text and the metadata is re-read after a moment.
 - `src/art.rs`: loads `file://`, `http(s)://`, or `data:` art off the main
   thread and decodes it to a `gdk::Texture`.
 - `src/record.rs`: a custom `gdk::Paintable` for the record. The disc is
-  rendered once with Cairo (black, a solid colour, or a domain-warped noise
-  marble in up to three k-means colours pulled from the album art) and uploaded
-  as a texture; each frame only rotates that texture plus the art label inside
-  the paintable's own snapshot, so a new angle invalidates one picture rather
-  than relaying out the card. About 3% CPU while spinning at 60 fps.
+  rendered once with Cairo (per-pixel patterns over domain-warped noise, in
+  colours pulled from the art by k-means) and uploaded as a texture; each
+  frame only rotates that texture plus the art label inside the paintable's
+  own snapshot, so a new angle invalidates one picture rather than relaying
+  out the card.
 - `src/arm.rs`: tone arm geometry (law of cosines from pivot to groove radius)
   and Cairo drawing, with a shadow that grows when the arm is lifted.
 - `src/theme.rs`: reads the palette Omarchy links at
-  `~/.local/state/omarchy/current/theme/colors.toml` and watches that
-  directory for theme switches.
+  `~/.local/state/omarchy/current/theme/colors.toml` and watches it for
+  theme switches.
 - `src/backdrop.rs`: the full-screen background, a GSK blur node over the art.
 - `src/placement.rs`: anchored corners, drag-to-move via layer-shell margins
   (or a compositor move in window mode), position persistence, and the
-  full-screen takeover (all four anchors, overlay layer, keyboard grab).
+  full-screen takeover.
 - `src/ui.rs`: the stage (sleeve, record, arm, sheen) built at a scale factor
   so full screen reuses the same layout, the text/controls column, and a
   frame-clock tick callback that sequences slide, spin and arm with easing.
+- `BarWidget.qml`, `manifest.json`, `bin/vinyl-ctl`: the Omarchy shell plugin.
+
+## License
+
+MIT.

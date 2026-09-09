@@ -54,6 +54,9 @@ struct Args {
     /// Start in full-screen mode; if the widget is already running, toggle it.
     #[arg(long)]
     fullscreen: bool,
+    /// Solid card background instead of translucent.
+    #[arg(long)]
+    opaque: bool,
     /// Start the widget, or quit it if it is already running.
     #[arg(long)]
     toggle: bool,
@@ -144,6 +147,7 @@ fn activate(app: &gtk::Application, args: &Args) {
         style,
         show_arm: !args.no_arm,
         start_fullscreen: args.fullscreen,
+        opaque: args.opaque,
     };
     let ui = ui::Ui::build(app, cfg, move |window| Placer::new(window, layer, placement));
     ui.window.present();
