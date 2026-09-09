@@ -1,0 +1,17 @@
+[package]
+name = "vinyl"
+version = "0.1.0"
+edition = "2021"
+description = "A spinning-record now-playing widget for Omarchy, fed by MPRIS (Spotify, Cider, anything)."
+license = "MIT"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
+gtk4-layer-shell = "0.8"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
