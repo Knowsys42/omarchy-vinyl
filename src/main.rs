@@ -1,13 +1,18 @@
+mod arm;
 mod art;
+mod backdrop;
 mod mpris;
+mod placement;
 mod record;
 mod ui;
 
 use clap::{Parser, ValueEnum};
 use gtk::glib;
 use gtk::prelude::*;
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::Layer;
 use mpris::{Mpris, Preferences};
+use placement::{Anchor, Placement, Placer};
+use record::VinylStyle;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -16,23 +21,10 @@ enum LayerArg {
     Bottom,
     /// Above windows.
     Top,
-    /// Above everything, including fullscreen.
+    /// Above everything, including fullscreen apps.
     Overlay,
     /// A normal floating window; no layer-shell.
     Window,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Anchor {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-    Top,
-    Bottom,
-    Left,
-    Right,
-    Center,
 }
 
 /// A spinning-record now-playing widget for Omarchy, fed by MPRIS.
@@ -42,12 +34,22 @@ struct Args {
     /// Where to put the widget in the layer stack.
     #[arg(long, value_enum, default_value_t = LayerArg::Bottom)]
     layer: LayerArg,
-    /// Screen corner or edge to pin to.
-    #[arg(long, value_enum, default_value_t = Anchor::BottomRight)]
-    anchor: Anchor,
+    /// Screen corner or edge to pin to. Overrides (and forgets) a dragged position.
+    #[arg(long, value_enum)]
+    anchor: Option<Anchor>,
     /// Gap in pixels from the anchored edges.
     #[arg(long, default_value_t = 32)]
     margin: i32,
+    /// Disc colour: black, marble (swirled from the album art), art (the art's
+    /// dominant colour), or any CSS colour like crimson or #1e90ff.
+    #[arg(long, default_value = "black", value_parser = VinylStyle::parse)]
+    vinyl: VinylStyle,
+    /// Hide the tone arm.
+    #[arg(long)]
+    no_arm: bool,
+    /// Start in full-screen mode.
+    #[arg(long)]
+    fullscreen: bool,
     /// Players to prefer when several are playing (identity or bus-name substring).
     #[arg(long, default_values_t = vec!["spotify".to_string(), "cider".to_string()])]
     prefer: Vec<String>,
@@ -67,8 +69,31 @@ fn main() -> glib::ExitCode {
 }
 
 fn activate(app: &gtk::Application, args: &Args) {
-    let ui = ui::Ui::build(app, args.rpm);
-    place_window(&ui.window, args);
+    let layer = match args.layer {
+        LayerArg::Bottom => Some(Layer::Bottom),
+        LayerArg::Top => Some(Layer::Top),
+        LayerArg::Overlay => Some(Layer::Overlay),
+        LayerArg::Window => None,
+    };
+    let placement = match args.anchor {
+        Some(anchor) => Placement::Anchored { anchor, margin: args.margin },
+        None => Placement::load_saved().unwrap_or(Placement::Anchored {
+            anchor: Anchor::BottomRight,
+            margin: args.margin,
+        }),
+    };
+    if args.anchor.is_some() {
+        // An explicit anchor replaces any remembered drag position.
+        let _ = std::fs::remove_file(glib::user_config_dir().join("vinyl").join("position"));
+    }
+
+    let cfg = ui::UiConfig {
+        rpm: args.rpm,
+        style: args.vinyl.clone(),
+        show_arm: !args.no_arm,
+        start_fullscreen: args.fullscreen,
+    };
+    let ui = ui::Ui::build(app, cfg, move |window| Placer::new(window, layer, placement));
     ui.window.present();
 
     let prefs = Preferences {
@@ -90,40 +115,4 @@ fn activate(app: &gtk::Application, args: &Args) {
         ui2.connect_command(move |cmd| m.command(cmd));
         mpris.start();
     });
-}
-
-fn place_window(window: &gtk::ApplicationWindow, args: &Args) {
-    if matches!(args.layer, LayerArg::Window) {
-        return;
-    }
-    if !gtk4_layer_shell::is_supported() {
-        eprintln!("vinyl: compositor lacks wlr-layer-shell; falling back to a normal window");
-        return;
-    }
-    window.init_layer_shell();
-    window.set_namespace(Some("vinyl"));
-    window.set_layer(match args.layer {
-        LayerArg::Bottom => Layer::Bottom,
-        LayerArg::Top => Layer::Top,
-        LayerArg::Overlay => Layer::Overlay,
-        LayerArg::Window => unreachable!(),
-    });
-    window.set_keyboard_mode(KeyboardMode::None);
-    window.set_exclusive_zone(0);
-
-    let (top, bottom, left, right) = match args.anchor {
-        Anchor::TopLeft => (true, false, true, false),
-        Anchor::TopRight => (true, false, false, true),
-        Anchor::BottomLeft => (false, true, true, false),
-        Anchor::BottomRight => (false, true, false, true),
-        Anchor::Top => (true, false, false, false),
-        Anchor::Bottom => (false, true, false, false),
-        Anchor::Left => (false, false, true, false),
-        Anchor::Right => (false, false, false, true),
-        Anchor::Center => (false, false, false, false),
-    };
-    for (edge, on) in [(Edge::Top, top), (Edge::Bottom, bottom), (Edge::Left, left), (Edge::Right, right)] {
-        window.set_anchor(edge, on);
-        window.set_margin(edge, if on { args.margin } else { 0 });
-    }
 }
