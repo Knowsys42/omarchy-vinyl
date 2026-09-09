@@ -4,6 +4,7 @@ mod backdrop;
 mod mpris;
 mod placement;
 mod record;
+mod theme;
 mod ui;
 
 use clap::{Parser, ValueEnum};
@@ -40,10 +41,12 @@ struct Args {
     /// Gap in pixels from the anchored edges.
     #[arg(long, default_value_t = 32)]
     margin: i32,
-    /// Disc colour: black, marble (swirled from the album art), art (the art's
-    /// dominant colour), or any CSS colour like crimson or #1e90ff.
-    #[arg(long, default_value = "black", value_parser = VinylStyle::parse)]
-    vinyl: VinylStyle,
+    /// Disc style: a preset (black, marble, splatter, split, tri, starburst,
+    /// galaxy, smoke, picture, rainbow, gold, clear, glow, omarchy), a CSS
+    /// colour, or pattern:palette such as splatter:theme or split:#1e90ff,white.
+    /// Defaults to the last style picked with the button.
+    #[arg(long, value_parser = VinylStyle::parse)]
+    vinyl: Option<VinylStyle>,
     /// Hide the tone arm.
     #[arg(long)]
     no_arm: bool,
@@ -87,9 +90,14 @@ fn activate(app: &gtk::Application, args: &Args) {
         let _ = std::fs::remove_file(glib::user_config_dir().join("vinyl").join("position"));
     }
 
+    let style = args
+        .vinyl
+        .clone()
+        .or_else(|| placement::load_config("style").and_then(|s| VinylStyle::parse(&s).ok()))
+        .unwrap_or_else(|| VinylStyle::parse("black").unwrap());
     let cfg = ui::UiConfig {
         rpm: args.rpm,
-        style: args.vinyl.clone(),
+        style,
         show_arm: !args.no_arm,
         start_fullscreen: args.fullscreen,
     };

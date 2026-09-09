@@ -33,12 +33,41 @@ vinyl --layer window        # plain floating window (for testing)
 vinyl --ignore brave        # never show browser tabs; repeatable
 vinyl --prefer cider        # who wins when several players are playing
 vinyl --rpm 45
-vinyl --vinyl marble        # disc marbled from the album art's colours
-vinyl --vinyl art           # solid disc in the art's dominant colour
+vinyl --vinyl marble        # a preset (see below)
 vinyl --vinyl crimson       # any CSS colour: "#1e90ff", teal, ...
+vinyl --vinyl splatter:theme        # pattern:palette combos
+vinyl --vinyl split:#1e90ff,white
 vinyl --no-arm              # hide the tone arm
 vinyl --fullscreen          # start in the full-screen view
 ```
+
+## Pressings
+
+The palette button in the card's corner (visible on hover) steps through the
+presets; right-click steps back. The choice is remembered in
+`~/.config/vinyl/style` and used on the next start unless `--vinyl` is given.
+
+| Preset | Look |
+| --- | --- |
+| `black` | The classic pressing. |
+| `marble` | Domain-warped swirl in the album art's colours, with white veins. |
+| `splatter` | Base colour with paint-splatter blobs of the other two art colours. |
+| `split` | Two art colours, half and half, with a wavy seam. |
+| `tri` | Three art colours in wedges. |
+| `starburst` | Fourteen alternating spokes of two art colours. |
+| `galaxy` | Deep space, nebulae in the art's colours, and stars. |
+| `smoke` | Black with white smoke wisps. |
+| `picture` | Picture disc: the art edge to edge, no label. |
+| `rainbow` | A hue sweep around the disc. |
+| `gold` | Brushed metallic gold. |
+| `clear` | Translucent pressing. |
+| `glow` | Glow-in-the-dark green. |
+| `omarchy` | Marbled from the current Omarchy theme: accent, the most saturated theme colours, foreground. Re-presses live when you switch themes. |
+
+Any pattern (`solid`, `marble`, `splatter`, `split`, `tri`, `starburst`,
+`galaxy`, `smoke`, `picture`, `rainbow`, `gold`, `clear`) can be combined with
+any palette (`art`, `theme`, `black`, or a comma-separated list of CSS colours)
+as `pattern:palette`, so `starburst:theme` or `tri:crimson,gold,black` work.
 
 Drag the card and the new position is remembered in
 `~/.config/vinyl/position` (with the monitor it was on). Passing `--anchor`
@@ -97,6 +126,9 @@ layerrule = ignorezero, vinyl
   than relaying out the card. About 3% CPU while spinning at 60 fps.
 - `src/arm.rs`: tone arm geometry (law of cosines from pivot to groove radius)
   and Cairo drawing, with a shadow that grows when the arm is lifted.
+- `src/theme.rs`: reads the palette Omarchy links at
+  `~/.local/state/omarchy/current/theme/colors.toml` and watches that
+  directory for theme switches.
 - `src/backdrop.rs`: the full-screen background, a GSK blur node over the art.
 - `src/placement.rs`: anchored corners, drag-to-move via layer-shell margins
   (or a compositor move in window mode), position persistence, and the

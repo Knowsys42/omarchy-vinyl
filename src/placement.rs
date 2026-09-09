@@ -37,8 +37,26 @@ pub struct Placer {
     dragging: Cell<bool>,
 }
 
+fn config_path(name: &str) -> PathBuf {
+    glib::user_config_dir().join("vinyl").join(name)
+}
+
 fn state_file() -> PathBuf {
-    glib::user_config_dir().join("vinyl").join("position")
+    config_path("position")
+}
+
+pub fn save_config(name: &str, value: &str) {
+    let path = config_path(name);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&path, format!("{value}\n")) {
+        eprintln!("vinyl: cannot save {name}: {e}");
+    }
+}
+
+pub fn load_config(name: &str) -> Option<String> {
+    std::fs::read_to_string(config_path(name)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 impl Placement {

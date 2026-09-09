@@ -7,9 +7,11 @@ use crate::art;
 use crate::backdrop::Backdrop;
 use crate::mpris::{Command, PlayerState, Status};
 use crate::placement::Placer;
-use crate::record::{RecordPaintable, VinylStyle};
+use crate::record::{presets, RecordPaintable, Rgb, VinylStyle};
+use crate::theme;
 use gtk::cairo;
 use gtk::gdk;
+use gtk::gio;
 use gtk::glib;
 use gtk::pango;
 use gtk::prelude::*;
@@ -75,6 +77,7 @@ button.ctl:disabled { color: rgba(255,255,255,0.25); }
 button.fs { padding: 2px; color: rgba(255,255,255,0.35); opacity: 0; }
 .card:hover button.fs { opacity: 1; }
 button.fs:hover { color: rgba(255,255,255,0.9); }
+.flash { color: rgba(255,255,255,0.85); }
 
 window.takeover .card { background: transparent; border: none; box-shadow: none; padding: 0; }
 window.takeover .column { margin-left: 48px; }
@@ -145,7 +148,7 @@ enum Hit {
 }
 
 impl Stage {
-    fn new(k: f64, style: VinylStyle, show_arm: bool, anim: Rc<RefCell<Anim>>) -> Self {
+    fn new(k: f64, style: VinylStyle, theme: Vec<Rgb>, show_arm: bool, anim: Rc<RefCell<Anim>>) -> Self {
         let sleeve_px = (B_SLEEVE * k).round() as i32;
         let record_px = (B_RECORD * k).round() as i32;
         let fixed = gtk::Fixed::new();
@@ -153,7 +156,7 @@ impl Stage {
 
         // Big records don't need a 2x texture.
         let tex_scale = if record_px > 400 { 1 } else { 2 };
-        let paintable = RecordPaintable::new(record_px, tex_scale, style);
+        let paintable = RecordPaintable::new(record_px, tex_scale, style, theme);
         let record = gtk::Picture::for_paintable(&paintable);
         record.set_size_request(record_px, record_px);
         record.set_can_shrink(false);
@@ -268,7 +271,12 @@ pub struct Ui {
     play_btn: gtk::Button,
     next_btn: gtk::Button,
     fs_btn: gtk::Button,
+    style_btn: gtk::Button,
     cfg: UiConfig,
+    style: RefCell<VinylStyle>,
+    theme_colors: RefCell<Vec<Rgb>>,
+    theme_monitor: RefCell<Option<gio::FileMonitor>>,
+    flash_gen: Cell<u64>,
     state: RefCell<Option<PlayerState>>,
     art_url: RefCell<Option<String>>,
     art_tex: RefCell<Option<gdk::Texture>>,
@@ -299,7 +307,8 @@ impl Ui {
             geom: base_geometry(),
         }));
 
-        let stage = Stage::new(1.0, cfg.style.clone(), cfg.show_arm, anim.clone());
+        let theme_colors = theme::load();
+        let stage = Stage::new(1.0, cfg.style.clone(), theme_colors.clone(), cfg.show_arm, anim.clone());
         let stage_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
         stage_slot.set_valign(gtk::Align::Center);
         stage_slot.append(&stage.root);
@@ -314,8 +323,15 @@ impl Ui {
         fs_btn.add_css_class("fs");
         fs_btn.add_css_class("circular");
         fs_btn.set_valign(gtk::Align::Center);
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let style_btn = gtk::Button::from_icon_name("color-select-symbolic");
+        style_btn.add_css_class("ctl");
+        style_btn.add_css_class("fs");
+        style_btn.add_css_class("circular");
+        style_btn.set_valign(gtk::Align::Center);
+        style_btn.set_tooltip_text(Some(&format!("{} (click: next, right-click: previous)", cfg.style.label())));
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         header.append(&player_label);
+        header.append(&style_btn);
         header.append(&fs_btn);
 
         let title = gtk::Label::new(None);
@@ -419,6 +435,11 @@ impl Ui {
             play_btn,
             next_btn,
             fs_btn,
+            style_btn,
+            style: RefCell::new(cfg.style.clone()),
+            theme_colors: RefCell::new(theme_colors),
+            theme_monitor: RefCell::new(None),
+            flash_gen: Cell::new(0),
             cfg,
             state: RefCell::new(None),
             art_url: RefCell::new(None),
@@ -430,6 +451,7 @@ impl Ui {
 
         ui.wire_events();
         ui.show_idle();
+        ui.watch_theme();
 
         let this = ui.clone();
         glib::timeout_add_local(Duration::from_millis(250), move || {
@@ -467,6 +489,13 @@ impl Ui {
         self.next_btn.connect_clicked(move |_| this.emit(Command::Next));
         let this = self.clone();
         self.fs_btn.connect_clicked(move |_| this.set_fullscreen(!this.placer.is_fullscreen()));
+        let this = self.clone();
+        self.style_btn.connect_clicked(move |_| this.cycle_style(1));
+        let right = gtk::GestureClick::new();
+        right.set_button(3);
+        let this = self.clone();
+        right.connect_released(move |_, _, _, _| this.cycle_style(-1));
+        self.style_btn.add_controller(right);
 
         self.wire_stage_click();
 
@@ -549,7 +578,13 @@ impl Ui {
     }
 
     fn rebuild_stage(self: &Rc<Self>, k: f64) {
-        let old = self.stage.replace(Stage::new(k, self.cfg.style.clone(), self.cfg.show_arm, self.anim.clone()));
+        let old = self.stage.replace(Stage::new(
+            k,
+            self.style.borrow().clone(),
+            self.theme_colors.borrow().clone(),
+            self.cfg.show_arm,
+            self.anim.clone(),
+        ));
         self.stage_slot.remove(&old.root);
         {
             let stage = self.stage.borrow();
@@ -559,6 +594,62 @@ impl Ui {
             stage.apply(&self.anim.borrow());
         }
         self.wire_stage_click();
+    }
+
+    // --- vinyl style --------------------------------------------------------
+
+    /// Step through the presets. A custom style (from `--vinyl`) starts at the first preset.
+    fn cycle_style(self: &Rc<Self>, delta: i32) {
+        let list = presets();
+        let current = self.style.borrow().clone();
+        let idx = list.iter().position(|p| p.style == current);
+        let next = match idx {
+            Some(i) => (i as i32 + delta).rem_euclid(list.len() as i32) as usize,
+            None => 0,
+        };
+        self.set_style(list[next].style.clone());
+    }
+
+    pub fn set_style(self: &Rc<Self>, style: VinylStyle) {
+        let label = style.label();
+        *self.style.borrow_mut() = style.clone();
+        self.stage.borrow().paintable.set_style(style.clone());
+        self.style_btn.set_tooltip_text(Some(&format!("{label} (click: next, right-click: previous)")));
+        crate::placement::save_config("style", &style.to_string());
+        self.flash(&label);
+    }
+
+    /// Show a short message in the header, then restore the player name.
+    fn flash(self: &Rc<Self>, text: &str) {
+        let gen = self.flash_gen.get() + 1;
+        self.flash_gen.set(gen);
+        self.player_label.set_text(&text.to_uppercase());
+        self.player_label.add_css_class("flash");
+        let this = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(1600), move || {
+            if this.flash_gen.get() == gen {
+                this.player_label.remove_css_class("flash");
+                this.refresh_header();
+            }
+        });
+    }
+
+    fn refresh_header(&self) {
+        let state = self.state.borrow();
+        match state.as_ref() {
+            Some(st) => self.player_label.set_text(&st.identity.to_uppercase()),
+            None => self.player_label.set_text("NOTHING PLAYING"),
+        }
+    }
+
+    fn watch_theme(self: &Rc<Self>) {
+        let this = self.clone();
+        let monitor = theme::watch(move || {
+            let colors = theme::load();
+            *this.theme_colors.borrow_mut() = colors.clone();
+            this.stage.borrow().paintable.set_theme(colors);
+        });
+        *self.theme_monitor.borrow_mut() = monitor;
     }
 
     // --- state --------------------------------------------------------------
@@ -574,7 +665,9 @@ impl Ui {
     }
 
     fn show_idle(self: &Rc<Self>) {
-        self.player_label.set_text("NOTHING PLAYING");
+        if !self.player_label.has_css_class("flash") {
+            self.player_label.set_text("NOTHING PLAYING");
+        }
         self.title.set_text("Drop the needle");
         self.artist.set_text("Start Spotify or Cider");
         self.album.set_text("");
@@ -592,7 +685,9 @@ impl Ui {
     }
 
     fn show_player(self: &Rc<Self>, st: &PlayerState) {
-        self.player_label.set_text(&st.identity.to_uppercase());
+        if !self.player_label.has_css_class("flash") {
+            self.player_label.set_text(&st.identity.to_uppercase());
+        }
         self.title.set_text(if st.track.title.is_empty() { "Untitled" } else { &st.track.title });
         self.artist.set_text(&st.track.artist);
         self.album.set_text(&st.track.album);
