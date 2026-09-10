@@ -12,7 +12,52 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-lock="${XDG_RUNTIME_DIR:-/tmp}/vinyl-build.lock"
+self="$(id -u)"
+
+die() {
+  echo "vinyl-ctl: $*" >&2
+  exit 1
+}
+
+# True only for a real directory (never a symlink) that this user owns and that
+# no one else can write. Both halves matter: ownership alone still allows a
+# group-writable directory, and the symlink check keeps a planted link from
+# standing in for the directory we think we verified.
+verified_dir() {
+  local path=$1 meta owner perms
+  [[ -d $path && ! -L $path ]] || return 1
+  meta=$(stat -c '%u %a' -- "$path" 2>/dev/null) || return 1
+  owner=${meta%% *}
+  perms=${meta##* }
+  [[ $owner == "$self" ]] || return 1
+  (( (8#$perms & 8#022) == 0 ))
+}
+
+# Private scratch space for the build lock and log. Never a world-writable
+# directory: in /tmp anyone can pre-create our predictable paths as symlinks
+# and redirect what we write. XDG_RUNTIME_DIR is already per-user and 0700;
+# ~/.cache is the fallback when it is unset, as under a bare `su` or cron.
+state_dir() {
+  local base="" dir
+  if [[ -n ${XDG_RUNTIME_DIR:-} ]] && verified_dir "$XDG_RUNTIME_DIR"; then
+    base=$XDG_RUNTIME_DIR
+  elif [[ -n ${HOME:-} ]]; then
+    mkdir -p -m 700 -- "$HOME/.cache" 2>/dev/null || true
+    verified_dir "$HOME/.cache" && base=$HOME/.cache
+  fi
+  [[ -n $base ]] || die "no private directory available; set XDG_RUNTIME_DIR or HOME"
+
+  dir="$base/vinyl"
+  # mkdir will not follow or reuse a planted symlink: it fails with EEXIST,
+  # and the verification below then refuses whatever is actually there.
+  mkdir -m 700 -- "$dir" 2>/dev/null || true
+  verified_dir "$dir" || die "refusing to use $dir: not a private directory owned by this user"
+  printf '%s\n' "$dir"
+}
+
+state="$(state_dir)"
+lock="$state/build.lock"
+log="$state/build.log"
 
 find_bin() {
   if command -v vinyl >/dev/null 2>&1; then
@@ -29,34 +74,48 @@ notify() {
 }
 
 build() {
-  if [[ -e $lock ]]; then
+  # The lock is a directory. mkdir is atomic and cannot be satisfied by an
+  # existing path, so unlike touch it can never be pointed somewhere else.
+  if ! mkdir -- "$lock" 2>/dev/null; then
     echo "building" >&2
     exit 0
   fi
+  trap 'rmdir -- "$lock" 2>/dev/null || true' EXIT
+
   local missing=()
   for pkg in rust gtk4 gtk4-layer-shell; do
     pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
   done
   if (( ${#missing[@]} )); then
     notify "Vinyl needs packages" "Run: omarchy pkg add ${missing[*]}"
-    echo "missing packages: ${missing[*]}" >&2
-    exit 1
+    die "missing packages: ${missing[*]}"
   fi
-  touch "$lock"
-  trap 'rm -f "$lock"' EXIT
+
+  # Create the log with O_EXCL (noclobber) so an existing path is never
+  # opened through. rm -rf removes a symlink itself, not whatever it targets.
+  rm -rf -- "$log"
+  set -C
+  : > "$log" || die "cannot create $log"
+  set +C
+
   notify "Vinyl" "Building the widget, this takes a minute…"
-  if (cd "$here" && cargo build --release >/tmp/vinyl-build.log 2>&1); then
+  # --locked builds exactly the dependency graph recorded in Cargo.lock and
+  # fails rather than silently resolving something newer.
+  if (cd "$here" && cargo build --release --locked >>"$log" 2>&1); then
     notify "Vinyl" "Ready. Click the bar record to open it."
   else
-    notify "Vinyl build failed" "See /tmp/vinyl-build.log"
-    exit 1
+    notify "Vinyl build failed" "See $log"
+    die "build failed; see $log"
   fi
 }
 
 cmd="${1:-toggle}"
 case "$cmd" in
   status)
-    if [[ -e $lock ]]; then echo building; elif find_bin >/dev/null; then echo ready; else echo missing; fi
+    if [[ -d $lock ]]; then echo building
+    elif find_bin >/dev/null; then echo ready
+    else echo missing
+    fi
     exit 0
     ;;
   build)
@@ -77,5 +136,5 @@ case "$cmd" in
   style)      exec "$bin" --next-style ;;
   here)       exec "$bin" --monitor current --workspace current "${extra[@]}" ;;
   everywhere) exec "$bin" --workspace all "${extra[@]}" ;;
-  *) echo "usage: vinyl-ctl [toggle|fullscreen|style|here|everywhere|build|status]" >&2; exit 2 ;;
+  *) die "usage: vinyl-ctl [toggle|fullscreen|style|here|everywhere|build|status]" ;;
 esac
