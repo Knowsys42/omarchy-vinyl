@@ -32,6 +32,11 @@ const B_STAGE_W: f64 = B_SLEEVE + B_OUT + B_ARM_ROOM;
 const B_STAGE_H: f64 = B_SLEEVE + 2.0 * B_PAD;
 const B_ARM_REST: f64 = 82.0;
 const MIN_FRAME_US: i64 = 1_000_000 / 60;
+/// How far the album art may be enlarged in the full-screen view. A browser
+/// publishes a 150px thumbnail over MPRIS; stretched across an 800px sleeve
+/// that is only blur, so the stage shrinks to suit the art instead. The
+/// blurred backdrop still fills the screen either way.
+const MAX_ART_UPSCALE: f64 = 2.5;
 
 fn base_geometry() -> ArmGeometry {
     ArmGeometry {
@@ -570,6 +575,25 @@ impl Ui {
         self.set_fullscreen(!self.placer.is_fullscreen());
     }
 
+    /// Stage scale for the full-screen view: as large as the monitor allows,
+    /// but never enlarging the album art past MAX_ART_UPSCALE.
+    fn fullscreen_scale(&self) -> f64 {
+        let (mw, mh) = self.placer.monitor_size().unwrap_or((1920, 1080));
+        let fits = (mh as f64 * 0.62 / B_STAGE_H).min(mw as f64 * 0.42 / B_STAGE_W);
+        let art_allows = self
+            .art_tex
+            .borrow()
+            .as_ref()
+            .map(|t| t.width().min(t.height()) as f64 * MAX_ART_UPSCALE / B_SLEEVE)
+            .unwrap_or(f64::INFINITY);
+        let k = fits.min(art_allows).clamp(2.0, 8.0);
+        if std::env::var_os("VINYL_DEBUG").is_some() {
+            let art = self.art_tex.borrow().as_ref().map(|t| (t.width(), t.height()));
+            eprintln!("vinyl: fullscreen scale {k:.2} (monitor allows {fits:.2}, art {art:?} allows {art_allows:.2}), sleeve {:.0}px", B_SLEEVE * k);
+        }
+        k
+    }
+
     pub fn set_fullscreen(self: &Rc<Self>, on: bool) {
         if self.placer.is_fullscreen() == on {
             return;
@@ -578,12 +602,7 @@ impl Ui {
         if on && !self.window.is_visible() {
             self.window.set_visible(true);
         }
-        let k = if on {
-            let (mw, mh) = self.placer.monitor_size().unwrap_or((1920, 1080));
-            ((mh as f64 * 0.62 / B_STAGE_H).min(mw as f64 * 0.42 / B_STAGE_W)).clamp(1.5, 8.0)
-        } else {
-            1.0
-        };
+        let k = if on { self.fullscreen_scale() } else { 1.0 };
         if on {
             self.window.add_css_class("takeover");
         } else {
@@ -820,6 +839,7 @@ impl Ui {
         }
         self.title.set_text(if st.track.title.is_empty() { "Untitled" } else { &st.track.title });
         self.artist.set_text(&st.track.artist);
+        self.artist.set_visible(!st.track.artist.is_empty());
         self.album.set_text(&st.track.album);
         self.album.set_visible(!st.track.album.is_empty());
         let playing = st.status == Status::Playing;
@@ -845,7 +865,10 @@ impl Ui {
         let frac = if len > 0 { (pos as f64 / len as f64).clamp(0.0, 1.0) } else { 0.0 };
         self.progress.set_fraction(frac);
         self.elapsed.set_text(&fmt_time(pos));
-        self.total.set_text(&fmt_time(len));
+        // A player that publishes no credible length gets a blank total rather
+        // than a made-up one.
+        let total = if len > 0 { fmt_time(len) } else { String::new() };
+        self.total.set_text(&total);
         drop(state);
         let changed = {
             let mut a = self.anim.borrow_mut();
@@ -878,6 +901,14 @@ impl Ui {
                     this.art_tex.replace(Some(tex.clone()));
                     this.stage.borrow().set_art(Some(&tex), seed_for(Some(&url)));
                     this.backdrop.set_art(Some(tex));
+                    // A sharper or coarser cover changes how large the stage
+                    // may be drawn, so re-scale if we are already full screen.
+                    if this.placer.is_fullscreen() {
+                        let k = this.fullscreen_scale();
+                        if (k - this.stage.borrow().k).abs() > 0.01 {
+                            this.rebuild_stage(k);
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => eprintln!("vinyl: art {url}: {e}"),

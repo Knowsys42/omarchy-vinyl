@@ -21,6 +21,16 @@ const DBUS_PATH: &str = "/org/freedesktop/DBus";
 const CALL_TIMEOUT_MS: i32 = 2000;
 const POSITION_POLL: Duration = Duration::from_millis(1500);
 const METADATA_SETTLE: Duration = Duration::from_millis(1200);
+/// Longest track length we will believe. Players occasionally publish
+/// nonsense here: Cider has been seen reporting i64::MAX microseconds, which
+/// rendered as a total of 153722867280:54. Anything outside this range is
+/// treated as "length unknown" instead.
+const MAX_TRACK_US: i64 = 24 * 3600 * 1_000_000;
+
+/// A published duration, or 0 when it is missing or not credible.
+fn sane_duration(value: i64) -> i64 {
+    if (1..=MAX_TRACK_US).contains(&value) { value } else { 0 }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Status {
@@ -408,10 +418,12 @@ impl Mpris {
             let reply_ty = glib::VariantTy::new("(v)").unwrap();
             if let Ok(reply) = this.call(&name, PROPS_IFACE, "Get", Some(&args), Some(reply_ty)).await {
                 if let Some(pos) = reply.child_value(0).as_variant().and_then(|v| variant_i64(&v)) {
-                    this.update_quiet(&name, |st| {
-                        st.position_us = pos;
-                        st.sampled_at = Instant::now();
-                    });
+                    if (0..=MAX_TRACK_US).contains(&pos) {
+                        this.update_quiet(&name, |st| {
+                            st.position_us = pos;
+                            st.sampled_at = Instant::now();
+                        });
+                    }
                 }
             }
         });
@@ -555,7 +567,7 @@ fn apply_player_props(st: &mut PlayerState, props: &HashMap<String, glib::Varian
                 .and_then(|v| v.str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            length_us: m.get("mpris:length").and_then(variant_i64).unwrap_or(0),
+            length_us: sane_duration(m.get("mpris:length").and_then(variant_i64).unwrap_or(0)),
             track_id: m
                 .get("mpris:trackid")
                 .and_then(|v| v.str())
@@ -588,7 +600,7 @@ fn apply_player_props(st: &mut PlayerState, props: &HashMap<String, glib::Varian
         }
     }
     if let Some(p) = props.get("Position").and_then(variant_i64) {
-        st.position_us = p;
+        st.position_us = if (0..=MAX_TRACK_US).contains(&p) { p } else { 0 };
         st.sampled_at = Instant::now();
     }
 }
