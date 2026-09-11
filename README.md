@@ -80,8 +80,15 @@ opens or closes the desktop widget, right-click opens the full-screen view,
 middle-click steps to the next pressing. Shift+click brings the widget to the
 monitor and workspace you're on; Ctrl+click shows it everywhere again. The first click builds the widget
 from source, which takes about a minute and needs `rust`, `gtk4`, and
-`gtk4-layer-shell` (`omarchy pkg add rust gtk4 gtk4-layer-shell`). Once
-`vinyl` is on your `PATH` the plugin uses that instead.
+`gtk4-layer-shell` (`omarchy pkg add rust gtk4 gtk4-layer-shell`).
+
+The bar action only ever runs the binary built inside the plugin's own
+checkout. A `vinyl` on your `PATH` is deliberately ignored, so what the bar
+launches is always the artifact from the locked build rather than whatever the
+session's `PATH` happens to resolve. The helper resolves its own tools
+(`cargo`, `pacman`, `mkdir`, …) from a fixed trusted path for the same
+reason, and refuses to run an artifact that is a symlink, is not owned by you,
+or is writable by anyone else.
 
 Bar-widget settings, in the plugin's entry in `~/.config/omarchy/shell.json`:
 
@@ -96,9 +103,13 @@ Bar-widget settings, in the plugin's entry in `~/.config/omarchy/shell.json`:
 sudo pacman -S --needed gtk4 gtk4-layer-shell rust
 git clone https://github.com/Knowsys42/omarchy-vinyl.git
 cd omarchy-vinyl
-cargo build --release
+cargo build --release --locked
 install -Dm755 target/release/vinyl ~/.local/bin/vinyl
 ```
+
+That copy is for running `vinyl` yourself from a shell or from autostart. The
+bar widget does not use it; it builds and runs its own copy inside the plugin
+directory.
 
 To start it with your session, add to `~/.config/hypr/autostart.lua`:
 

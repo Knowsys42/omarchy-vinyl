@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bar-widget helper: find (or build) the vinyl binary and drive it.
+# Bar-widget helper: build (if needed) and drive this checkout's vinyl binary.
 #
 #   vinyl-ctl toggle       start the desktop widget, or quit it if running
 #   vinyl-ctl fullscreen   open/close the full-screen view (starts it if needed)
@@ -11,109 +11,188 @@
 
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-self="$(id -u)"
-
 die() {
   echo "vinyl-ctl: $*" >&2
   exit 1
 }
 
-# True only for a real directory (never a symlink) that this user owns and that
-# no one else can write. Both halves matter: ownership alone still allows a
-# group-writable directory, and the symlink check keeps a planted link from
-# standing in for the directory we think we verified.
-verified_dir() {
-  local path=$1 meta owner perms
-  [[ -d $path && ! -L $path ]] || return 1
-  meta=$(stat -c '%u %a' -- "$path" 2>/dev/null) || return 1
-  owner=${meta%% *}
-  perms=${meta##* }
-  [[ $owner == "$self" ]] || return 1
+# ---------------------------------------------------------------- trusted path
+#
+# The bar action runs with the user's full session environment, so anything
+# resolved through the caller's PATH could be shadowed: a planted mkdir, cargo
+# or rustc would then execute with that user's authority during the on-demand
+# build. Every helper below is resolved from this closed list instead, and PATH
+# is replaced so cargo's own child lookups (rustc, cc, the linker) are bound by
+# the same list.
+
+readonly TRUSTED_DIRS=(/usr/bin /bin)
+PATH="$(IFS=:; printf '%s' "${TRUSTED_DIRS[*]}")"
+export PATH
+
+# Bootstrap stat by existence alone; it is re-resolved through the full check
+# below as soon as it can verify itself.
+STAT=""
+for _dir in "${TRUSTED_DIRS[@]}"; do
+  [[ -x $_dir/stat ]] && { STAT="$_dir/stat"; break; }
+done
+[[ -n $STAT ]] || die "no stat in the trusted path"
+
+# An executable we are willing to run: found in the trusted list, a regular
+# file once any symlink is followed, owned by root, and not writable by group
+# or others.
+trusted_exe() {
+  local name=$1 candidate meta kind owner perms
+  for candidate in "${TRUSTED_DIRS[@]}"; do
+    candidate="$candidate/$name"
+    [[ -f $candidate && -x $candidate ]] || continue
+    meta=$("$STAT" -Lc '%F|%u|%a' -- "$candidate" 2>/dev/null) || continue
+    IFS='|' read -r kind owner perms <<<"$meta"
+    [[ $kind == "regular file" ]] || continue
+    [[ $owner == 0 ]] || continue
+    (( (8#$perms & 8#022) == 0 )) || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+STAT=$(trusted_exe stat) || die "stat in the trusted path is not a root-owned regular file"
+MKDIR=$(trusted_exe mkdir) || die "mkdir not found in the trusted path"
+RMDIR=$(trusted_exe rmdir) || die "rmdir not found in the trusted path"
+RM=$(trusted_exe rm) || die "rm not found in the trusted path"
+PACMAN=$(trusted_exe pacman) || die "pacman not found in the trusted path"
+# Notifications are cosmetic. If notify-send is absent we simply stay quiet;
+# we never fall back to an ambient one.
+NOTIFY=$(trusted_exe notify-send) || NOTIFY=""
+
+notify() {
+  [[ -n $NOTIFY ]] && "$NOTIFY" -a Vinyl "$@" || true
+}
+
+# ------------------------------------------------------------------ state dir
+#
+# Private scratch space for the build lock and log, never a world-writable
+# directory. Once validated the directory is pinned by descriptor and only ever
+# addressed through /proc/self/fd, so a pathname swapped after validation
+# cannot redirect what we create.
+
+# Ownership and mode, following the final symlink. Used for both a pathname and
+# a /proc/self/fd handle, which is itself a symlink by construction.
+dir_is_private() {
+  local meta kind owner perms
+  meta=$("$STAT" -Lc '%F|%u|%a' -- "$1" 2>/dev/null) || return 1
+  IFS='|' read -r kind owner perms <<<"$meta"
+  [[ $kind == directory ]] || return 1
+  [[ $owner == "$EUID" ]] || return 1
   (( (8#$perms & 8#022) == 0 ))
 }
 
-# Private scratch space for the build lock and log. Never a world-writable
-# directory: in /tmp anyone can pre-create our predictable paths as symlinks
-# and redirect what we write. XDG_RUNTIME_DIR is already per-user and 0700;
-# ~/.cache is the fallback when it is unset, as under a bare `su` or cron.
-state_dir() {
+# Pathname form additionally refuses a symlink at the final component.
+verified_dir() {
+  [[ ! -L $1 ]] || return 1
+  dir_is_private "$1"
+}
+
+open_state() {
   local base="" dir
   if [[ -n ${XDG_RUNTIME_DIR:-} ]] && verified_dir "$XDG_RUNTIME_DIR"; then
     base=$XDG_RUNTIME_DIR
   elif [[ -n ${HOME:-} ]]; then
-    mkdir -p -m 700 -- "$HOME/.cache" 2>/dev/null || true
+    "$MKDIR" -p -m 700 -- "$HOME/.cache" 2>/dev/null || true
     verified_dir "$HOME/.cache" && base=$HOME/.cache
   fi
   [[ -n $base ]] || die "no private directory available; set XDG_RUNTIME_DIR or HOME"
 
   dir="$base/vinyl"
-  # mkdir will not follow or reuse a planted symlink: it fails with EEXIST,
-  # and the verification below then refuses whatever is actually there.
-  mkdir -m 700 -- "$dir" 2>/dev/null || true
+  # mkdir will not follow or reuse a planted symlink: it fails with EEXIST, and
+  # the check below then refuses whatever is actually there.
+  "$MKDIR" -m 700 -- "$dir" 2>/dev/null || true
   verified_dir "$dir" || die "refusing to use $dir: not a private directory owned by this user"
-  printf '%s\n' "$dir"
+
+  exec {state_fd}< "$dir" || die "cannot open $dir"
+  # Re-check through the descriptor, so what we validated is what we hold.
+  dir_is_private "/proc/self/fd/$state_fd" || die "state directory changed identity"
+  state_shown=$dir
 }
 
-state="$(state_dir)"
-lock="$state/build.lock"
-log="$state/build.log"
+open_state
+lock="/proc/self/fd/$state_fd/build.lock"
+log="/proc/self/fd/$state_fd/build.log"
+log_shown="$state_shown/build.log"
 
-find_bin() {
-  if command -v vinyl >/dev/null 2>&1; then
-    command -v vinyl
-  elif [[ -x "$here/target/release/vinyl" ]]; then
-    echo "$here/target/release/vinyl"
-  else
-    return 1
-  fi
+# ------------------------------------------------------------------- artifact
+#
+# Only the artifact built from this checkout is ever executed. An ambient PATH
+# entry named vinyl is deliberately ignored: the bar action would otherwise run
+# whatever the caller's PATH resolves to, bypassing the reviewed, locked build.
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+artifact="$here/target/release/vinyl"
+
+trusted_artifact() {
+  local meta kind owner perms
+  [[ -f $artifact && -x $artifact && ! -L $artifact ]] || return 1
+  meta=$("$STAT" -c '%F|%u|%a' -- "$artifact" 2>/dev/null) || return 1
+  IFS='|' read -r kind owner perms <<<"$meta"
+  [[ $kind == "regular file" ]] || return 1
+  [[ $owner == "$EUID" ]] || return 1
+  (( (8#$perms & 8#022) == 0 ))
 }
 
-notify() {
-  command -v notify-send >/dev/null 2>&1 && notify-send -a Vinyl "$@" || true
+release_lock() {
+  "$RMDIR" -- "$lock" 2>/dev/null || true
 }
 
 build() {
-  # The lock is a directory. mkdir is atomic and cannot be satisfied by an
-  # existing path, so unlike touch it can never be pointed somewhere else.
-  if ! mkdir -- "$lock" 2>/dev/null; then
-    echo "building" >&2
-    exit 0
-  fi
-  trap 'rmdir -- "$lock" 2>/dev/null || true' EXIT
+  # The lock is a directory. mkdir is atomic and fails on any pre-existing
+  # path, so unlike touch it can never be pointed somewhere else.
+  "$MKDIR" -- "$lock" 2>/dev/null || { echo "building" >&2; exit 0; }
+  trap release_lock EXIT
 
-  local missing=()
+  local missing=() pkg
   for pkg in rust gtk4 gtk4-layer-shell; do
-    pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    "$PACMAN" -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
   done
   if (( ${#missing[@]} )); then
     notify "Vinyl needs packages" "Run: omarchy pkg add ${missing[*]}"
     die "missing packages: ${missing[*]}"
   fi
 
-  # Create the log with O_EXCL (noclobber) so an existing path is never
-  # opened through. rm -rf removes a symlink itself, not whatever it targets.
-  rm -rf -- "$log"
+  local cargo
+  cargo=$(trusted_exe cargo) || die "cargo not found in the trusted path; install the rust package"
+
+  # Create the log with O_EXCL (noclobber) so an existing path is never opened
+  # through. rm -rf removes a symlink itself, not whatever it targets.
+  "$RM" -rf -- "$log"
   set -C
-  : > "$log" || die "cannot create $log"
+  : > "$log" || die "cannot create $log_shown"
   set +C
 
   notify "Vinyl" "Building the widget, this takes a minute…"
   # --locked builds exactly the dependency graph recorded in Cargo.lock and
   # fails rather than silently resolving something newer.
-  if (cd "$here" && cargo build --release --locked >>"$log" 2>&1); then
+  if (cd "$here" && "$cargo" build --release --locked >>"$log" 2>&1); then
     notify "Vinyl" "Ready. Click the bar record to open it."
   else
-    notify "Vinyl build failed" "See $log"
-    die "build failed; see $log"
+    notify "Vinyl build failed" "See $log_shown"
+    die "build failed; see $log_shown"
   fi
+}
+
+ensure_artifact() {
+  trusted_artifact && return 0
+  if [[ -e $artifact || -L $artifact ]]; then
+    die "refusing to run $artifact: not a regular file owned by this user without foreign write access"
+  fi
+  build
+  trusted_artifact || die "build finished but $artifact is not a trusted artifact"
 }
 
 cmd="${1:-toggle}"
 case "$cmd" in
   status)
     if [[ -d $lock ]]; then echo building
-    elif find_bin >/dev/null; then echo ready
+    elif trusted_artifact; then echo ready
     else echo missing
     fi
     exit 0
@@ -124,17 +203,17 @@ case "$cmd" in
     ;;
 esac
 
-bin=$(find_bin) || { build; bin=$(find_bin); }
+ensure_artifact
 
 # Extra arguments for a fresh start come from the plugin's shell.json entry
 # via VINYL_ARGS, e.g. "--vinyl marble --ignore brave".
 read -r -a extra <<<"${VINYL_ARGS:-}"
 
 case "$cmd" in
-  toggle)     exec "$bin" --toggle "${extra[@]}" ;;
-  fullscreen) exec "$bin" --fullscreen "${extra[@]}" ;;
-  style)      exec "$bin" --next-style ;;
-  here)       exec "$bin" --monitor current --workspace current "${extra[@]}" ;;
-  everywhere) exec "$bin" --workspace all "${extra[@]}" ;;
+  toggle)     exec "$artifact" --toggle "${extra[@]}" ;;
+  fullscreen) exec "$artifact" --fullscreen "${extra[@]}" ;;
+  style)      exec "$artifact" --next-style ;;
+  here)       exec "$artifact" --monitor current --workspace current "${extra[@]}" ;;
+  everywhere) exec "$artifact" --workspace all "${extra[@]}" ;;
   *) die "usage: vinyl-ctl [toggle|fullscreen|style|here|everywhere|build|status]" ;;
 esac
