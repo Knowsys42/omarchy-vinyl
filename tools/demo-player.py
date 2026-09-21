@@ -98,6 +98,13 @@ class Player:
             self.pos_at = time.monotonic()
             self.status = "Playing" if want else "Paused"
             self.changed({"PlaybackStatus": GLib.Variant("s", self.status)})
+        elif method in ("Seek", "SetPosition"):
+            offset = params[0] if method == "Seek" else None
+            want = self.position() + offset if offset is not None else params[1]
+            self.pos_us = max(0, min(want, self.length_us))
+            self.pos_at = time.monotonic()
+            self.conn.emit_signal(None, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player",
+                                  "Seeked", GLib.Variant("(x)", (self.pos_us,)))
         elif method in ("Next", "Previous"):
             self.pos_us, self.pos_at = 0, time.monotonic()
             self.changed({"Metadata": self.metadata()})

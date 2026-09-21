@@ -3,6 +3,28 @@
 All notable changes to Vinyl are recorded here. Dates are the day the work
 landed on `main`.
 
+## Unreleased
+
+### Added
+
+- **Drag the progress bar to seek.** The bar is a real slider now, and the tone
+  arm follows it as you drag. A drag sends one `SetPosition` when you stop
+  moving rather than one per pixel; players that publish no usable track path
+  get the relative `Seek` instead. Players that report `CanSeek` as false keep
+  a plain, handle-less bar.
+- **A specular sheen on the record.** The lamp stays put while the disc turns
+  under it, so the light now reads off the grooves in two lobes the way a real
+  pressing does. No pressing is perfectly flat, so the highlight wobbles once
+  per revolution.
+
+### Fixed
+
+- **The skip and full-screen buttons no longer render as broken images.** They
+  were drawn from the icon theme, and a desktop pointed at a theme that is not
+  installed leaves GTK with only the handful of icons compiled into it — which
+  covers play and pause, but not skip or restore. Every control glyph is drawn
+  by Vinyl now, so the icon theme cannot break them.
+
 ## 0.2.3 — 2026-09-14
 
 Album art looked soft in the full-screen view, and a misbehaving player could

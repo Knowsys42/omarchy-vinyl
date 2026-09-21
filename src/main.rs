@@ -1,6 +1,7 @@
 mod arm;
 mod art;
 mod backdrop;
+mod glyph;
 mod hypr;
 mod mpris;
 mod placement;

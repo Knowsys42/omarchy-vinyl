@@ -204,6 +204,27 @@ pub struct ArtPixels {
     rgb: Vec<u8>,
 }
 
+/// Where the lamp sits, in degrees around the disc, and how far the highlight
+/// swings either side of that as a warped pressing turns.
+const SHEEN_ANGLE: f32 = 42.0;
+const SHEEN_WOBBLE: f32 = 7.0;
+
+/// One turn around the disc: a bright lobe at the light, a dimmer one opposite
+/// it, and darkness across the grooves that face away.
+fn sheen_stops() -> [gsk::ColorStop; 7] {
+    let white = |a: f32| gdk::RGBA::new(1.0, 1.0, 1.0, a);
+    let stop = |offset: f32, a: f32| gsk::ColorStop::new(offset, white(a));
+    [
+        stop(0.00, 0.15),
+        stop(0.11, 0.0),
+        stop(0.39, 0.0),
+        stop(0.50, 0.09),
+        stop(0.61, 0.0),
+        stop(0.89, 0.0),
+        stop(1.00, 0.15),
+    ]
+}
+
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
@@ -295,6 +316,22 @@ mod imp {
             snapshot.pop();
 
             snapshot.restore();
+
+            // Specular sheen, drawn outside the rotation: the lamp stays put
+            // while the record turns under it. Concentric grooves throw the
+            // reflection into two lobes opposite each other along the light
+            // axis, which is a conic gradient. No pressing is perfectly flat,
+            // so the axis wobbles once per revolution.
+            let disc = graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+            let wobble = SHEEN_WOBBLE * (self.angle.get() * PI / 180.0).sin() as f32;
+            snapshot.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, cx.min(cy)));
+            snapshot.append_conic_gradient(
+                &disc,
+                &graphene::Point::new(cx, cy),
+                SHEEN_ANGLE + wobble,
+                &sheen_stops(),
+            );
+            snapshot.pop();
         }
     }
 }

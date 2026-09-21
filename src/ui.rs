@@ -5,6 +5,7 @@
 use crate::arm::{self, ArmGeometry};
 use crate::art;
 use crate::backdrop::Backdrop;
+use crate::glyph::{self, Glyph};
 use crate::hypr;
 use crate::mpris::{Command, PlayerState, Status};
 use crate::placement::Placer;
@@ -68,9 +69,15 @@ window { background: transparent; }
 .artist { font-size: 13px; color: rgba(255,255,255,0.72); }
 .album { font-size: 12px; color: rgba(255,255,255,0.45); }
 .time { font-size: 10px; color: rgba(255,255,255,0.45); font-variant-numeric: tabular-nums; }
-progressbar.thin { min-height: 4px; }
-progressbar.thin trough { min-height: 4px; border-radius: 2px; background: rgba(255,255,255,0.12); }
-progressbar.thin progress { min-height: 4px; border-radius: 2px; background: rgba(255,255,255,0.85); }
+scale.thin { min-height: 0; padding: 0; margin-top: 6px; }
+scale.thin trough { min-height: 4px; border: none; border-radius: 2px; background: rgba(255,255,255,0.12); }
+scale.thin highlight { min-height: 4px; border: none; border-radius: 2px; background: rgba(255,255,255,0.85); }
+/* The knob sits on the groove; a player that refuses to seek gets none. */
+scale.thin slider { min-width: 11px; min-height: 11px; margin: -4px; border-radius: 50%;
+  background: #fff; border: none; box-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+scale.thin:disabled slider { background: transparent; box-shadow: none; }
+scale.thin:disabled highlight { background: rgba(255,255,255,0.45); }
+scale.thin:focus-visible trough { outline: 2px solid rgba(255,255,255,0.45); outline-offset: 3px; }
 button.ctl {
   background: transparent; border: none; box-shadow: none; padding: 6px;
   color: rgba(255,255,255,0.85); min-width: 0; min-height: 0;
@@ -80,6 +87,8 @@ button.ctl:active { background: rgba(255,255,255,0.18); }
 button.ctl.play { background: rgba(255,255,255,0.92); color: #111; padding: 8px; }
 button.ctl.play:hover { background: #fff; }
 button.ctl:disabled { color: rgba(255,255,255,0.25); }
+.glyph { min-width: 16px; min-height: 16px; }
+button.fs .glyph { min-width: 14px; min-height: 14px; }
 button.fs { padding: 2px; color: rgba(255,255,255,0.35); opacity: 0; }
 .card:hover button.fs { opacity: 1; }
 button.fs:hover { color: rgba(255,255,255,0.9); }
@@ -93,11 +102,12 @@ window.takeover .title { font-size: 44px; }
 window.takeover .artist { font-size: 26px; }
 window.takeover .album { font-size: 20px; }
 window.takeover .time { font-size: 14px; }
-window.takeover progressbar.thin trough,
-window.takeover progressbar.thin progress { min-height: 6px; border-radius: 3px; }
+window.takeover scale.thin trough,
+window.takeover scale.thin highlight { min-height: 6px; border-radius: 3px; }
+window.takeover scale.thin slider { min-width: 15px; min-height: 15px; margin: -5px; }
 window.takeover button.ctl { padding: 14px; }
 window.takeover button.ctl.play { padding: 18px; }
-window.takeover button.ctl image { -gtk-icon-size: 30px; }
+window.takeover button.ctl .glyph { min-width: 30px; min-height: 30px; }
 window.takeover button.fs { opacity: 1; }
 window.takeover .sleeve { border-radius: 22px; }
 "#;
@@ -274,13 +284,18 @@ pub struct Ui {
     title: gtk::Label,
     artist: gtk::Label,
     album: gtk::Label,
-    progress: gtk::ProgressBar,
+    progress: gtk::Scale,
+    /// Where the user has dragged the bar to, until the seek is sent. Holds
+    /// the clock and the bar still so the poll doesn't yank them back.
+    scrub: Cell<Option<i64>>,
     elapsed: gtk::Label,
     total: gtk::Label,
     prev_btn: gtk::Button,
     play_btn: gtk::Button,
     next_btn: gtk::Button,
     fs_btn: gtk::Button,
+    play_glyph: gtk::DrawingArea,
+    fs_glyph: gtk::DrawingArea,
     style_btn: gtk::Button,
     cfg: UiConfig,
     style: RefCell<VinylStyle>,
@@ -331,12 +346,13 @@ impl Ui {
         player_label.add_css_class("player");
         player_label.set_xalign(0.0);
         player_label.set_hexpand(true);
-        let fs_btn = gtk::Button::from_icon_name("view-fullscreen-symbolic");
+        let fs_glyph = glyph::icon(Glyph::Fullscreen);
+        let fs_btn = gtk::Button::builder().child(&fs_glyph).build();
         fs_btn.add_css_class("ctl");
         fs_btn.add_css_class("fs");
         fs_btn.add_css_class("circular");
         fs_btn.set_valign(gtk::Align::Center);
-        let style_btn = gtk::Button::from_icon_name("color-select-symbolic");
+        let style_btn = gtk::Button::builder().child(&glyph::icon(Glyph::Pressing)).build();
         style_btn.add_css_class("ctl");
         style_btn.add_css_class("fs");
         style_btn.add_css_class("circular");
@@ -360,9 +376,10 @@ impl Ui {
             l.set_width_chars(24);
         }
 
-        let progress = gtk::ProgressBar::new();
+        let progress = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.002);
         progress.add_css_class("thin");
-        progress.set_margin_top(6);
+        progress.set_draw_value(false);
+        progress.set_sensitive(false);
 
         let elapsed = gtk::Label::new(Some("0:00"));
         let total = gtk::Label::new(Some("0:00"));
@@ -375,9 +392,10 @@ impl Ui {
         times.append(&spacer);
         times.append(&total);
 
-        let prev_btn = gtk::Button::from_icon_name("media-skip-backward-symbolic");
-        let play_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
-        let next_btn = gtk::Button::from_icon_name("media-skip-forward-symbolic");
+        let play_glyph = glyph::icon(Glyph::Play);
+        let prev_btn = gtk::Button::builder().child(&glyph::icon(Glyph::Prev)).build();
+        let play_btn = gtk::Button::builder().child(&play_glyph).build();
+        let next_btn = gtk::Button::builder().child(&glyph::icon(Glyph::Next)).build();
         for b in [&prev_btn, &play_btn, &next_btn] {
             b.add_css_class("ctl");
             b.add_css_class("circular");
@@ -445,12 +463,15 @@ impl Ui {
             artist,
             album,
             progress,
+            scrub: Cell::new(None),
             elapsed,
             total,
             prev_btn,
             play_btn,
             next_btn,
             fs_btn,
+            play_glyph,
+            fs_glyph,
             style_btn,
             style: RefCell::new(cfg.style.clone()),
             theme_colors: RefCell::new(theme_colors),
@@ -510,6 +531,36 @@ impl Ui {
         self.fs_btn.connect_clicked(move |_| this.set_fullscreen(!this.placer.is_fullscreen()));
         let this = self.clone();
         self.style_btn.connect_clicked(move |_| this.cycle_style(1));
+        // Dragging fires continuously; sending a D-Bus seek per pixel would
+        // make players stutter, so the last position wins once motion stops.
+        let this = self.clone();
+        self.progress.connect_change_value(move |_, _, value| {
+            let len = this.state.borrow().as_ref().map(|st| st.track.length_us).unwrap_or(0);
+            if len <= 0 {
+                return glib::Propagation::Stop;
+            }
+            let target = (value.clamp(0.0, 1.0) * len as f64) as i64;
+            this.elapsed.set_text(&fmt_time(target));
+            let first = this.scrub.replace(Some(target)).is_none();
+            if first {
+                let this = this.clone();
+                let last = Cell::new(target);
+                glib::timeout_add_local(Duration::from_millis(120), move || {
+                    let Some(t) = this.scrub.get() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if t != last.get() {
+                        last.set(t);
+                        return glib::ControlFlow::Continue;
+                    }
+                    this.scrub.set(None);
+                    this.emit(Command::Seek(t));
+                    glib::ControlFlow::Break
+                });
+            }
+            glib::Propagation::Proceed
+        });
+
         let right = gtk::GestureClick::new();
         right.set_button(3);
         let this = self.clone();
@@ -609,7 +660,7 @@ impl Ui {
             self.window.remove_css_class("takeover");
         }
         self.backdrop_pic.set_visible(on);
-        self.fs_btn.set_icon_name(if on { "view-restore-symbolic" } else { "view-fullscreen-symbolic" });
+        glyph::set(&self.fs_glyph, if on { Glyph::Restore } else { Glyph::Fullscreen });
         for l in [&self.title, &self.artist, &self.album] {
             l.set_max_width_chars(if on { 28 } else { 24 });
             l.set_width_chars(if on { 28 } else { 24 });
@@ -820,10 +871,11 @@ impl Ui {
         self.title.set_text("Drop the needle");
         self.artist.set_text("Play something");
         self.album.set_text("");
-        self.progress.set_fraction(0.0);
+        self.progress.set_value(0.0);
+        self.progress.set_sensitive(false);
         self.elapsed.set_text("0:00");
         self.total.set_text("0:00");
-        self.play_btn.set_icon_name("media-playback-start-symbolic");
+        glyph::set(&self.play_glyph, Glyph::Play);
         for b in [&self.prev_btn, &self.play_btn, &self.next_btn] {
             b.set_sensitive(false);
         }
@@ -843,14 +895,11 @@ impl Ui {
         self.album.set_text(&st.track.album);
         self.album.set_visible(!st.track.album.is_empty());
         let playing = st.status == Status::Playing;
-        self.play_btn.set_icon_name(if playing {
-            "media-playback-pause-symbolic"
-        } else {
-            "media-playback-start-symbolic"
-        });
+        glyph::set(&self.play_glyph, if playing { Glyph::Pause } else { Glyph::Play });
         self.play_btn.set_sensitive(true);
         self.prev_btn.set_sensitive(st.can_go_previous);
         self.next_btn.set_sensitive(st.can_go_next);
+        self.progress.set_sensitive(st.can_seek && st.track.length_us > 0);
         self.set_art(st.track.art_url.clone());
         self.anim.borrow_mut().playing = playing;
     }
@@ -860,10 +909,12 @@ impl Ui {
         let Some(st) = state.as_ref() else {
             return;
         };
-        let pos = st.position_us();
+        let pos = self.scrub.get().unwrap_or_else(|| st.position_us());
         let len = st.track.length_us;
         let frac = if len > 0 { (pos as f64 / len as f64).clamp(0.0, 1.0) } else { 0.0 };
-        self.progress.set_fraction(frac);
+        if self.scrub.get().is_none() {
+            self.progress.set_value(frac);
+        }
         self.elapsed.set_text(&fmt_time(pos));
         // A player that publishes no credible length gets a blank total rather
         // than a made-up one.

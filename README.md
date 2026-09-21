@@ -14,6 +14,7 @@ Pause and the arm lifts, the platter coasts down, and the record slides home.
 ![Play, slide, drop the needle](docs/spin.gif)
 
 - Click the record or the arm to play/pause, the sleeve to raise the player.
+- Drag the progress bar to seek, on any player that allows it.
 - Drag the card anywhere to move it. The position is remembered.
 - Hover the card for two corner buttons: one steps through fourteen pressings
   (right-click steps back), the other opens the full-screen view.

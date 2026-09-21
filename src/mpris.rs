@@ -59,6 +59,7 @@ pub struct PlayerState {
     pub rate: f64,
     pub can_go_next: bool,
     pub can_go_previous: bool,
+    pub can_seek: bool,
     /// Position reported by the player, and when we sampled it.
     position_us: i64,
     sampled_at: Instant,
@@ -76,6 +77,7 @@ impl PlayerState {
             rate: 1.0,
             can_go_next: false,
             can_go_previous: false,
+            can_seek: false,
             position_us: 0,
             sampled_at: Instant::now(),
             last_change: Instant::now(),
@@ -106,6 +108,8 @@ pub enum Command {
     Next,
     Previous,
     Raise,
+    /// Jump to an absolute position, in microseconds from the start.
+    Seek(i64),
 }
 
 /// Which players to prefer or hide, matched case-insensitively against the
@@ -192,11 +196,16 @@ impl Mpris {
         let Some(name) = self.inner.borrow().active.clone() else {
             return;
         };
+        if let Command::Seek(target) = cmd {
+            self.seek(name, target);
+            return;
+        }
         let (iface, method) = match cmd {
             Command::PlayPause => (PLAYER_IFACE, "PlayPause"),
             Command::Next => (PLAYER_IFACE, "Next"),
             Command::Previous => (PLAYER_IFACE, "Previous"),
             Command::Raise => (ROOT_IFACE, "Raise"),
+            Command::Seek(_) => unreachable!("handled above"),
         };
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -411,6 +420,38 @@ impl Mpris {
         }
     }
 
+    /// Jump to an absolute position. `SetPosition` is the accurate way and
+    /// wants the track's object path; players that publish none (or the spec's
+    /// `NoTrack`) get the relative `Seek` worked out from where we think the
+    /// track is, which is what our own progress bar was showing anyway.
+    fn seek(self: &Rc<Self>, name: String, target: i64) {
+        let Some((track_id, current, length, can_seek)) = self.inner.borrow().players.get(&name).map(|st| {
+            (st.track.track_id.clone(), st.position_us(), st.track.length_us, st.can_seek)
+        }) else {
+            return;
+        };
+        if !can_seek || length <= 0 {
+            return;
+        }
+        let target = target.clamp(0, length);
+        let (method, args) = match seek_call(&track_id, target, current) {
+            SeekCall::SetPosition(path) => ("SetPosition", (path, target).to_variant()),
+            SeekCall::Seek(offset) => ("Seek", (offset,).to_variant()),
+        };
+        // Move the needle now; the player confirms the position right after.
+        self.update_quiet(&name, |st| {
+            st.position_us = target;
+            st.sampled_at = Instant::now();
+        });
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = this.call(&name, PLAYER_IFACE, method, Some(&args), None).await {
+                eprintln!("vinyl: {method} on {name} failed: {e}");
+            }
+            this.fetch_position(name);
+        });
+    }
+
     fn fetch_position(self: &Rc<Self>, name: String) {
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -539,6 +580,24 @@ fn variant_string_list(v: &glib::Variant) -> String {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum SeekCall {
+    SetPosition(glib::variant::ObjectPath),
+    Seek(i64),
+}
+
+/// `SetPosition` is absolute and immune to a stale position, but it needs the
+/// track's object path. Players that publish none, publish junk, or publish the
+/// spec's `NoTrack` placeholder get the relative `Seek` instead.
+fn seek_call(track_id: &str, target: i64, current: i64) -> SeekCall {
+    if !track_id.ends_with("/NoTrack") {
+        if let Ok(path) = glib::variant::ObjectPath::try_from(track_id) {
+            return SeekCall::SetPosition(path);
+        }
+    }
+    SeekCall::Seek(target - current)
+}
+
 fn apply_player_props(st: &mut PlayerState, props: &HashMap<String, glib::Variant>) {
     if let Some(s) = props.get("PlaybackStatus").and_then(|v| v.str()) {
         st.status = match s {
@@ -555,6 +614,9 @@ fn apply_player_props(st: &mut PlayerState, props: &HashMap<String, glib::Varian
     }
     if let Some(b) = props.get("CanGoPrevious").and_then(|v| v.get::<bool>()) {
         st.can_go_previous = b;
+    }
+    if let Some(b) = props.get("CanSeek").and_then(|v| v.get::<bool>()) {
+        st.can_seek = b;
     }
     if let Some(m) = props.get("Metadata") {
         let m = dict(m);
@@ -602,5 +664,29 @@ fn apply_player_props(st: &mut PlayerState, props: &HashMap<String, glib::Varian
     if let Some(p) = props.get("Position").and_then(variant_i64) {
         st.position_us = if (0..=MAX_TRACK_US).contains(&p) { p } else { 0 };
         st.sampled_at = Instant::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(s: &str) -> SeekCall {
+        SeekCall::SetPosition(glib::variant::ObjectPath::try_from(s).unwrap())
+    }
+
+    #[test]
+    fn seeking_prefers_the_absolute_call_when_the_track_has_a_path() {
+        assert_eq!(seek_call("/org/mpris/MediaPlayer2/vinyldemo/1", 90, 30), path("/org/mpris/MediaPlayer2/vinyldemo/1"));
+        assert_eq!(seek_call("/com/brave/MediaPlayer2/TrackList/TrackCC8C", 90, 30), path("/com/brave/MediaPlayer2/TrackList/TrackCC8C"));
+    }
+
+    #[test]
+    fn seeking_falls_back_to_the_relative_call() {
+        // No track, no path published, and a path D-Bus would reject.
+        for id in ["/org/mpris/MediaPlayer2/TrackList/NoTrack", "", "spotify:track:4u7e", "/trailing/"] {
+            assert_eq!(seek_call(id, 90, 30), SeekCall::Seek(60), "{id}");
+        }
+        assert_eq!(seek_call("", 10, 30), SeekCall::Seek(-20), "seeking backwards");
     }
 }
