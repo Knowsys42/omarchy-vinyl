@@ -3,6 +3,38 @@
 All notable changes to Vinyl are recorded here. Dates are the day the work
 landed on `main`.
 
+## Unreleased
+
+### Added
+
+- **Scratching.** Grab the record with the middle button and drag: it turns
+  under the pointer instead of under the motor, the stylus rides whatever
+  groove you leave it on, and letting go seeks the player there. One turn of
+  the platter is one turn's worth of music — 1.8 seconds on a 33 1/3 pressing,
+  1.33 on a 45. Deliberately undocumented in the README.
+
+### Fixed
+
+- **A negative-width warning from the progress bar.** The filled part of the
+  slider measured below zero at the left end, where the knob's negative margin
+  pulled it under, and GTK complained on stderr at every start.
+
+### Changed
+
+- **The tone arm's shadow falls on the record and nowhere else.** It was drawn
+  wherever the arm was, so the part of the arm hanging past the disc — the
+  pivot and counterweight, most of the travel while the record is in its
+  sleeve — laid a dark smear straight onto the desktop, with nothing under it
+  to catch one. It is clipped to the disc now, and softened: three overlapping
+  copies instead of one hard one, so the edge tapers the way a real penumbra
+  does and spreads further as the arm lifts.
+- **The label is printed paper.** A fine tooth from the fibres and a slower
+  mottle, so the ink is not perfectly even, over the album art as well as over
+  a plain label. It turns with the record, because print does.
+- **One sheen, not two.** The static reflection drawn over the record has been
+  folded into the lit disc added in 0.3.0, which does the same job from the
+  groove geometry and moves.
+
 ## 0.3.0 — 2026-09-21
 
 Three of the buttons were rendering as broken images on any desktop whose icon

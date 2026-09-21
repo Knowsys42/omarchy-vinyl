@@ -11,14 +11,12 @@ use crate::mpris::{Command, PlayerState, Status};
 use crate::placement::Placer;
 use crate::record::{presets, RecordPaintable, Rgb, VinylStyle};
 use crate::theme;
-use gtk::cairo;
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::pango;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::f64::consts::PI;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -71,7 +69,9 @@ window { background: transparent; }
 .time { font-size: 10px; color: rgba(255,255,255,0.45); font-variant-numeric: tabular-nums; }
 scale.thin { min-height: 0; padding: 0; margin-top: 6px; }
 scale.thin trough { min-height: 4px; border: none; border-radius: 2px; background: rgba(255,255,255,0.12); }
-scale.thin highlight { min-height: 4px; border: none; border-radius: 2px; background: rgba(255,255,255,0.85); }
+/* min-width keeps the filled part from measuring negative at the left end,
+   where the slider's negative margin would otherwise pull it below zero. */
+scale.thin highlight { min-height: 4px; min-width: 4px; border: none; border-radius: 2px; background: rgba(255,255,255,0.85); }
 /* The knob sits on the groove; a player that refuses to seek gets none. */
 scale.thin slider { min-width: 11px; min-height: 11px; margin: -4px; border-radius: 50%;
   background: #fff; border: none; box-shadow: 0 1px 3px rgba(0,0,0,0.5); }
@@ -130,6 +130,9 @@ struct Anim {
     ang_vel: f64,
     /// 0 = record in the sleeve, 1 = fully out.
     slide: f64,
+    /// A hand is on the record: it turns where it is put, not where the
+    /// motor wants it.
+    scratching: bool,
     arm_angle: f64,
     last_us: i64,
     tick: Option<gtk::TickCallbackId>,
@@ -145,7 +148,7 @@ impl Anim {
     }
 }
 
-/// Sleeve, record, arm and sheen at one scale factor.
+/// Sleeve, record and arm at one scale factor.
 struct Stage {
     k: f64,
     root: gtk::Overlay,
@@ -153,11 +156,21 @@ struct Stage {
     record: gtk::Picture,
     paintable: RecordPaintable,
     sleeve_pic: gtk::Image,
-    sheen: gtk::DrawingArea,
     arm: gtk::DrawingArea,
     show_arm: bool,
     last_slide: Cell<f64>,
     last_arm: Cell<f64>,
+}
+
+/// A hand on the platter: where the record is, where the pointer last was on
+/// it, and how far it has been turned since the grab.
+struct Scratch {
+    center: (f64, f64),
+    last_deg: f64,
+    swept: f64,
+    angle_at_grab: f64,
+    pos_at_grab: i64,
+    length_us: i64,
 }
 
 enum Hit {
@@ -192,14 +205,6 @@ impl Stage {
         fixed.put(&record, Self::record_x_for(k, 0.0), B_PAD * k);
         fixed.put(&sleeve, 0.0, B_PAD * k);
 
-        let sheen = gtk::DrawingArea::new();
-        sheen.set_can_target(false);
-        let a = anim.clone();
-        sheen.set_draw_func(move |_, cr, _, h| {
-            let slide = a.borrow().slide;
-            draw_sheen(cr, k, h as f64, Self::record_x_for(k, slide));
-        });
-
         let arm = gtk::DrawingArea::new();
         arm.set_can_target(false);
         arm.set_visible(show_arm);
@@ -207,12 +212,16 @@ impl Stage {
         arm.set_draw_func(move |_, cr, _, _| {
             let a = a.borrow();
             cr.scale(k, k);
-            arm::draw_arm(cr, &a.geom, a.arm_angle, a.lifted());
+            let r = B_RECORD / 2.0;
+            let disc = arm::Disc {
+                center: (Self::record_x_for(1.0, a.slide) + r, B_PAD + r),
+                radius: r,
+            };
+            arm::draw_arm(cr, &a.geom, a.arm_angle, a.lifted(), &disc);
         });
 
         let root = gtk::Overlay::new();
         root.set_child(Some(&fixed));
-        root.add_overlay(&sheen);
         root.add_overlay(&arm);
 
         Self {
@@ -222,7 +231,6 @@ impl Stage {
             record,
             paintable,
             sleeve_pic,
-            sheen,
             arm,
             show_arm,
             last_slide: Cell::new(-1.0),
@@ -240,7 +248,7 @@ impl Stage {
         if (a.slide - self.last_slide.get()).abs() > 1e-4 {
             self.last_slide.set(a.slide);
             self.fixed.move_(&self.record, Self::record_x_for(self.k, a.slide), B_PAD * self.k);
-            self.sheen.queue_draw();
+            self.arm.queue_draw();
         }
         if self.show_arm && (a.arm_angle - self.last_arm.get()).abs() > 0.02 {
             self.last_arm.set(a.arm_angle);
@@ -280,6 +288,7 @@ pub struct Ui {
     card: gtk::Box,
     stage_slot: gtk::Box,
     stage: RefCell<Stage>,
+    scratch: RefCell<Option<Scratch>>,
     player_label: gtk::Label,
     title: gtk::Label,
     artist: gtk::Label,
@@ -329,6 +338,7 @@ impl Ui {
             angle: 0.0,
             ang_vel: 0.0,
             slide: 0.0,
+            scratching: false,
             arm_angle: B_ARM_REST,
             last_us: 0,
             tick: None,
@@ -458,6 +468,7 @@ impl Ui {
             card,
             stage_slot,
             stage: RefCell::new(stage),
+            scratch: RefCell::new(None),
             player_label,
             title,
             artist,
@@ -618,6 +629,100 @@ impl Ui {
             }
         });
         self.stage.borrow().root.add_controller(click);
+
+        // Easter egg: grab the platter with the middle button and scratch it.
+        // The record turns under the pointer, the stylus rides the groove it
+        // lands on, and letting go seeks the player there.
+        let scratch = gtk::GestureDrag::new();
+        scratch.set_button(gdk::BUTTON_MIDDLE);
+        let this = self.clone();
+        scratch.connect_drag_begin(move |_, x, y| this.scratch_begin(x, y));
+        let this = self.clone();
+        scratch.connect_drag_update(move |g, dx, dy| {
+            if let Some((x, y)) = g.start_point() {
+                this.scratch_to(x + dx, y + dy);
+            }
+        });
+        let this = self.clone();
+        scratch.connect_drag_end(move |_, _, _| this.scratch_end());
+        self.stage.borrow().root.add_controller(scratch);
+    }
+
+    fn scratch_begin(self: &Rc<Self>, x: f64, y: f64) {
+        let grabbed = {
+            let stage = self.stage.borrow();
+            let a = self.anim.borrow();
+            if !matches!(stage.hit(&a, x, y), Hit::Record) {
+                return;
+            }
+            let r = B_RECORD / 2.0;
+            let center = (
+                (Stage::record_x_for(1.0, a.slide) + r) * stage.k,
+                (B_PAD + r) * stage.k,
+            );
+            (center, a.angle)
+        };
+        let (center, angle_at_grab) = grabbed;
+        let (pos_at_grab, length_us) = self
+            .state
+            .borrow()
+            .as_ref()
+            .map(|st| (st.position_us(), st.track.length_us))
+            .unwrap_or((0, 0));
+        *self.scratch.borrow_mut() = Some(Scratch {
+            center,
+            last_deg: (y - center.1).atan2(x - center.0).to_degrees(),
+            swept: 0.0,
+            angle_at_grab,
+            pos_at_grab,
+            length_us,
+        });
+        self.anim.borrow_mut().scratching = true;
+        self.ensure_animating();
+    }
+
+    fn scratch_to(self: &Rc<Self>, x: f64, y: f64) {
+        let Some((angle, target)) = ({
+            let mut held = self.scratch.borrow_mut();
+            held.as_mut().map(|s| {
+                let deg = (y - s.center.1).atan2(x - s.center.0).to_degrees();
+                s.swept += unwrap_step(s.last_deg, deg);
+                s.last_deg = deg;
+                let target = (s.length_us > 0)
+                    .then(|| scratch_target(s.pos_at_grab, s.swept, self.cfg.rpm, s.length_us));
+                ((s.angle_at_grab + s.swept).rem_euclid(360.0), target.map(|t| (t, s.length_us)))
+            })
+        }) else {
+            return;
+        };
+        {
+            let mut a = self.anim.borrow_mut();
+            a.angle = angle;
+            if let Some((t, len)) = target {
+                a.progress = t as f64 / len as f64;
+            }
+        }
+        if let Some((t, len)) = target {
+            self.scrub.set(Some(t));
+            self.progress.set_value(t as f64 / len as f64);
+            self.elapsed.set_text(&fmt_time(t));
+        }
+        self.ensure_animating();
+    }
+
+    fn scratch_end(self: &Rc<Self>) {
+        let Some(held) = self.scratch.borrow_mut().take() else {
+            return;
+        };
+        self.anim.borrow_mut().scratching = false;
+        // A middle click that never moved is not a scratch; don't seek on it.
+        if held.length_us > 0 && held.swept.abs() > 1.0 {
+            if let Some(t) = self.scrub.take() {
+                self.emit(Command::Seek(t));
+            }
+        }
+        self.scrub.set(None);
+        self.ensure_animating();
     }
 
     // --- full screen --------------------------------------------------------
@@ -1007,10 +1112,15 @@ impl Ui {
             let arm_target = if a.playing && record_out { needle } else { rest };
             let vel_target = if a.playing { self.cfg.rpm * 6.0 } else { 0.0 };
 
-            // Heavy platter: quick spin-up, slow coast-down.
-            let k = if vel_target > a.ang_vel { 3.0 } else { 1.4 };
-            a.ang_vel += (vel_target - a.ang_vel) * (1.0 - (-k * dt).exp());
-            a.angle = (a.angle + a.ang_vel * dt).rem_euclid(360.0);
+            // Heavy platter: quick spin-up, slow coast-down. A held record
+            // does neither; the pointer sets the angle.
+            if a.scratching {
+                a.ang_vel = 0.0;
+            } else {
+                let k = if vel_target > a.ang_vel { 3.0 } else { 1.4 };
+                a.ang_vel += (vel_target - a.ang_vel) * (1.0 - (-k * dt).exp());
+                a.angle = (a.angle + a.ang_vel * dt).rem_euclid(360.0);
+            }
             a.slide += (slide_target - a.slide) * (1.0 - (-7.0 * dt).exp());
             a.arm_angle += (arm_target - a.arm_angle) * (1.0 - (-4.5 * dt).exp());
 
@@ -1026,7 +1136,7 @@ impl Ui {
             if arm_done {
                 a.arm_angle = arm_target;
             }
-            vel_done && slide_done && arm_done
+            !a.scratching && vel_done && slide_done && arm_done
         };
         self.stage.borrow().apply(&self.anim.borrow());
         if settled {
@@ -1036,6 +1146,26 @@ impl Ui {
             glib::ControlFlow::Continue
         }
     }
+}
+
+/// How far the pointer swept this frame, unwrapped so that turning past twelve
+/// o'clock keeps counting instead of jumping a whole revolution.
+fn unwrap_step(last_deg: f64, deg: f64) -> f64 {
+    let step = (deg - last_deg).rem_euclid(360.0);
+    // Half a turn in one frame is a tie; call it forwards.
+    if step > 180.0 {
+        step - 360.0
+    } else {
+        step
+    }
+}
+
+/// Where a sweep of `swept` degrees from `pos_at_grab` lands in the track. One
+/// turn of the platter is one turn's worth of music, so a 33 1/3 record gives
+/// up 1.8 seconds per revolution.
+fn scratch_target(pos_at_grab: i64, swept: f64, rpm: f64, length_us: i64) -> i64 {
+    let secs = swept / 360.0 * 60.0 / rpm;
+    (pos_at_grab + (secs * 1e6).round() as i64).clamp(0, length_us)
 }
 
 fn fmt_time(us: i64) -> String {
@@ -1052,27 +1182,30 @@ fn seed_for(url: Option<&str>) -> u32 {
     h
 }
 
-/// Static reflection over the visible part of the record, so the disc reads as
-/// spinning under a fixed light.
-fn draw_sheen(cr: &cairo::Context, k: f64, h: f64, record_x: f64) {
-    let r = B_RECORD * k / 2.0;
-    let cx = record_x + r;
-    let cy = B_PAD * k + r;
-    let sleeve = B_SLEEVE * k;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    cr.rectangle(sleeve, 0.0, record_x + 2.0 * r - sleeve + 1.0, h);
-    cr.clip();
-    cr.arc(cx, cy, r, 0.0, 2.0 * PI);
-    cr.clip();
+    #[test]
+    fn a_sweep_past_twelve_oclock_keeps_counting() {
+        // atan2 wraps at +/-180; the step across that seam is small, not a turn.
+        assert!((unwrap_step(179.0, -179.0) - 2.0).abs() < 1e-9);
+        assert!((unwrap_step(-179.0, 179.0) + 2.0).abs() < 1e-9);
+        assert!((unwrap_step(10.0, 30.0) - 20.0).abs() < 1e-9);
+        // Exactly half a turn is forwards, never silently backwards.
+        assert!(unwrap_step(0.0, 180.0) > 0.0);
+    }
 
-    let g = cairo::LinearGradient::new(cx - r, cy - r, cx + r, cy + r);
-    g.add_color_stop_rgba(0.00, 1.0, 1.0, 1.0, 0.00);
-    g.add_color_stop_rgba(0.22, 1.0, 1.0, 1.0, 0.00);
-    g.add_color_stop_rgba(0.32, 1.0, 1.0, 1.0, 0.13);
-    g.add_color_stop_rgba(0.40, 1.0, 1.0, 1.0, 0.00);
-    g.add_color_stop_rgba(0.62, 1.0, 1.0, 1.0, 0.00);
-    g.add_color_stop_rgba(0.72, 1.0, 1.0, 1.0, 0.10);
-    g.add_color_stop_rgba(0.82, 1.0, 1.0, 1.0, 0.00);
-    let _ = cr.set_source(&g);
-    let _ = cr.paint();
+    #[test]
+    fn one_turn_of_the_platter_is_one_turn_of_music() {
+        let minute = 60_000_000;
+        // 33 1/3 rpm: a revolution is 1.8s, forwards and backwards.
+        assert_eq!(scratch_target(minute, 360.0, 100.0 / 3.0, 10 * minute), minute + 1_800_000);
+        assert_eq!(scratch_target(minute, -360.0, 100.0 / 3.0, 10 * minute), minute - 1_800_000);
+        // 45 rpm gives up less music per turn.
+        assert_eq!(scratch_target(minute, 360.0, 45.0, 10 * minute), minute + 1_333_333);
+        // Spinning off either end of the track stops at the end.
+        assert_eq!(scratch_target(minute, -100.0 * 360.0, 100.0 / 3.0, 10 * minute), 0);
+        assert_eq!(scratch_target(minute, 1000.0 * 360.0, 100.0 / 3.0, 10 * minute), 10 * minute);
+    }
 }

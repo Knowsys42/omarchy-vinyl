@@ -232,6 +232,7 @@ mod imp {
     pub struct RecordPaintable {
         pub disc: RefCell<Option<gdk::Texture>>,
         pub label: RefCell<Option<gdk::Texture>>,
+        pub grain: RefCell<Option<gdk::Texture>>,
         pub style: RefCell<VinylStyle>,
         pub art_colors: RefCell<Vec<Rgb>>,
         pub art_pixels: RefCell<Option<ArtPixels>>,
@@ -247,6 +248,7 @@ mod imp {
             Self {
                 disc: RefCell::new(None),
                 label: RefCell::new(None),
+                grain: RefCell::new(None),
                 style: RefCell::new(style(Pattern::Solid, Palette::Black)),
                 art_colors: RefCell::new(Vec::new()),
                 art_pixels: RefCell::new(None),
@@ -304,6 +306,9 @@ mod imp {
                 match self.label.borrow().as_ref() {
                     Some(tex) => snapshot.append_texture(tex, &cover_rect(tex, &label_rect)),
                     None => snapshot.append_color(&gdk::RGBA::new(0.42, 0.16, 0.16, 1.0), &label_rect),
+                }
+                if let Some(grain) = self.grain.borrow().as_ref() {
+                    snapshot.append_texture(grain, &label_rect);
                 }
                 snapshot.pop();
             }
@@ -400,6 +405,8 @@ impl RecordPaintable {
         let art = imp.art_pixels.borrow();
         let tex = render_disc(imp.size.get(), imp.scale.get(), style.pattern, &colors, art.as_ref(), imp.seed.get());
         imp.disc.replace(Some(tex));
+        let label_px = (imp.size.get() as f64 * LABEL_FRACTION * imp.scale.get() as f64).round() as i32;
+        imp.grain.replace(Some(render_grain(label_px.max(1), imp.seed.get())));
     }
 }
 
@@ -792,6 +799,38 @@ fn body_pixel(
 }
 
 /// Draw the disc once with Cairo and upload it as a texture.
+/// The label is printed paper, not plastic: a fine tooth from the fibres and a
+/// slow mottle so the ink is not perfectly even. Drawn over the label and
+/// under nothing, so it turns with the record the way print does.
+fn render_grain(px: i32, seed: u32) -> gdk::Texture {
+    let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).expect("cairo surface");
+    {
+        let stride = surface.stride() as usize;
+        let mut data = surface.data().expect("surface data");
+        let freq = 7.0 / px as f64;
+        for y in 0..px as usize {
+            for x in 0..px as usize {
+                let tooth = hash(x as i32, y as i32, seed) - 0.5;
+                let mottle = fbm(x as f64 * freq, y as f64 * freq, seed ^ 0x9e37_79b9) - 0.47;
+                // Light specks and dark specks, never more than a tenth opaque.
+                let v = tooth * 0.09 + mottle * 0.10;
+                let (lum, a) = if v >= 0.0 { (255.0, v) } else { (0.0, -v) };
+                let i = y * stride + x * 4;
+                let premul = (lum * a) as u8;
+                data[i] = premul;
+                data[i + 1] = premul;
+                data[i + 2] = premul;
+                data[i + 3] = (a * 255.0) as u8;
+            }
+        }
+    }
+    surface.flush();
+    let stride = surface.stride() as usize;
+    let data = surface.data().expect("surface data");
+    let bytes = glib::Bytes::from(&data[..]);
+    gdk::MemoryTexture::new(px, px, gdk::MemoryFormat::B8g8r8a8Premultiplied, &bytes, stride).upcast()
+}
+
 fn render_disc(size: i32, scale: i32, pattern: Pattern, colors: &[Rgb; 3], art: Option<&ArtPixels>, seed: u32) -> gdk::Texture {
     let px = size * scale;
 

@@ -6,6 +6,12 @@
 use gtk::cairo;
 use std::f64::consts::PI;
 
+/// Overlapping copies that stand in for a blurred shadow, and the ink each one
+/// lays down. Three at 0.15 land near the old single copy at 0.38 where they
+/// overlap, and taper where they do not.
+const SHADOW_STEPS: usize = 3;
+const SHADOW_INK: f64 = 0.15;
+
 pub struct ArmGeometry {
     pub pivot: (f64, f64),
     pub length: f64,
@@ -47,15 +53,31 @@ impl ArmGeometry {
     }
 }
 
-pub fn draw_arm(cr: &cairo::Context, g: &ArmGeometry, angle: f64, lifted: f64) {
+/// Where the record is at this instant. The arm's shadow falls on the record
+/// and nowhere else: off the disc there is nothing under the arm to catch it.
+pub struct Disc {
+    pub center: (f64, f64),
+    pub radius: f64,
+}
+
+pub fn draw_arm(cr: &cairo::Context, g: &ArmGeometry, angle: f64, lifted: f64, disc: &Disc) {
     let (px, py) = g.pivot;
 
-    // Shadow first, offset more when the arm is lifted off the record.
-    let (sx, sy) = (1.5 + 2.5 * lifted, 3.0 + 4.0 * lifted);
+    // Shadow first, offset more when the arm is lifted off the record, and
+    // smeared over three copies: a lifted arm throws a softer edge, and cairo
+    // has no blur.
     cr.save().ok();
-    cr.translate(px + sx, py + sy);
-    cr.rotate(angle.to_radians());
-    arm_shape(cr, g.length, true);
+    cr.arc(disc.center.0, disc.center.1, disc.radius, 0.0, 2.0 * PI);
+    cr.clip();
+    let (sx, sy) = (1.5 + 2.5 * lifted, 3.0 + 4.0 * lifted);
+    for step in 0..SHADOW_STEPS {
+        let t = 0.55 + 0.45 * step as f64 / (SHADOW_STEPS - 1) as f64;
+        cr.save().ok();
+        cr.translate(px + sx * t, py + sy * t);
+        cr.rotate(angle.to_radians());
+        arm_shape(cr, g.length, Some(SHADOW_INK));
+        cr.restore().ok();
+    }
     cr.restore().ok();
 
     // Base plate (does not rotate).
@@ -73,7 +95,7 @@ pub fn draw_arm(cr: &cairo::Context, g: &ArmGeometry, angle: f64, lifted: f64) {
     cr.save().ok();
     cr.translate(px, py);
     cr.rotate(angle.to_radians());
-    arm_shape(cr, g.length, false);
+    arm_shape(cr, g.length, None);
     cr.restore().ok();
 
     // Bearing cap.
@@ -86,18 +108,20 @@ pub fn draw_arm(cr: &cairo::Context, g: &ArmGeometry, angle: f64, lifted: f64) {
 }
 
 /// The arm along +x from the origin: counterweight behind, tube, headshell.
-fn arm_shape(cr: &cairo::Context, length: f64, shadow: bool) {
+/// `shadow` is the ink for one shadow pass, or `None` for the arm itself.
+fn arm_shape(cr: &cairo::Context, length: f64, shadow: Option<f64>) {
     let head_len = 20.0;
     let bend = 22f64.to_radians();
     let tube_len = length - head_len * 0.55;
+    let shadow_ink = shadow.is_some();
 
-    if shadow {
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.38);
+    if let Some(ink) = shadow {
+        cr.set_source_rgba(0.0, 0.0, 0.0, ink);
     }
 
     // Counterweight.
     round_rect(cr, -24.0, -6.0, 18.0, 12.0, 3.0);
-    if !shadow {
+    if !shadow_ink {
         let cw = cairo::LinearGradient::new(0.0, -6.0, 0.0, 6.0);
         cw.add_color_stop_rgb(0.0, 0.30, 0.30, 0.33);
         cw.add_color_stop_rgb(0.5, 0.16, 0.16, 0.18);
@@ -109,7 +133,7 @@ fn arm_shape(cr: &cairo::Context, length: f64, shadow: bool) {
     // Tube.
     cr.set_line_cap(cairo::LineCap::Round);
     cr.set_line_width(5.0);
-    if !shadow {
+    if !shadow_ink {
         let tube = cairo::LinearGradient::new(0.0, -2.5, 0.0, 2.5);
         tube.add_color_stop_rgb(0.0, 0.92, 0.92, 0.94);
         tube.add_color_stop_rgb(0.45, 0.70, 0.70, 0.73);
@@ -125,14 +149,14 @@ fn arm_shape(cr: &cairo::Context, length: f64, shadow: bool) {
     cr.translate(tube_len, 0.0);
     cr.rotate(bend);
     round_rect(cr, -2.0, -4.0, head_len, 8.0, 2.5);
-    if !shadow {
+    if !shadow_ink {
         let hs = cairo::LinearGradient::new(0.0, -4.0, 0.0, 4.0);
         hs.add_color_stop_rgb(0.0, 0.22, 0.22, 0.25);
         hs.add_color_stop_rgb(1.0, 0.06, 0.06, 0.08);
         cr.set_source(&hs).ok();
     }
     cr.fill().ok();
-    if !shadow {
+    if !shadow_ink {
         // Cartridge and stylus.
         cr.set_source_rgb(0.55, 0.55, 0.58);
         round_rect(cr, head_len - 9.0, -2.5, 6.0, 5.0, 1.0);
