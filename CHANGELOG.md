@@ -3,7 +3,12 @@
 All notable changes to Vinyl are recorded here. Dates are the day the work
 landed on `main`.
 
-## Unreleased
+## 0.3.0 — 2026-09-21
+
+Three of the buttons were rendering as broken images on any desktop whose icon
+theme is not installed. Fixing that meant drawing the glyphs, which is also
+what the record and the progress bar wanted: light that behaves, and a bar you
+can drag.
 
 ### Added
 
