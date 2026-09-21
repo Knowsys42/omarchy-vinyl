@@ -3,7 +3,10 @@
 All notable changes to Vinyl are recorded here. Dates are the day the work
 landed on `main`.
 
-## Unreleased
+## 0.4.0 — 2026-09-21
+
+The record picks up a hand on the platter, the tone arm stops throwing a
+shadow onto the desktop, and the label is printed on paper.
 
 ### Added
 

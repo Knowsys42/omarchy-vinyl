@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.knowsys42.vinyl",
   "name": "Vinyl",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Derek Choate",
   "license": "MIT",
   "description": "A spinning-record now-playing widget for any MPRIS player, with a bar button that shows when music is on.",
